@@ -7,7 +7,7 @@ export interface SessionUser {
   id: string; name: string; email: string;
   role: 'admin' | 'coordinator' | 'sales' | 'provider' | 'carrier';
   orgId?: string | null; orgRole?: 'admin' | 'worker';
-  perms: string[];
+  perms: string[]; mustChangePw?: number;
 }
 
 declare global {
@@ -20,7 +20,7 @@ authenticator.options = { window: 1 };
 export function currentUser(req: Request): SessionUser | null {
   const s: any = (req as any).session;
   if (!s?.userId) return null;
-  const u = db.prepare('SELECT id,name,email,role,orgId,orgRole,perms FROM users WHERE id=? AND active=1 AND approved=1').get(s.userId) as any;
+  const u = db.prepare('SELECT id,name,email,role,orgId,orgRole,perms,mustChangePw FROM users WHERE id=? AND active=1 AND approved=1').get(s.userId) as any;
   if (!u) return null;
   try { u.perms = JSON.parse(u.perms || '[]'); } catch { u.perms = []; }
   return u as SessionUser;
@@ -71,6 +71,10 @@ export function registerPortal(req: Request, res: Response) {
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const u = currentUser(req);
   if (!u) return res.status(401).json({ error: 'Not signed in' });
+  // Temp-password lockout: a known temporary password must not be a working key
+  // to the whole API. Until the user sets their own, only /api/auth/* works.
+  if (u.mustChangePw && !req.originalUrl.startsWith('/api/auth/'))
+    return res.status(403).json({ error: 'Set a new password first — your temporary one expired' });
   req.user = u;
   next();
 }
@@ -80,7 +84,7 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-/* Login rate limiting: 5 failures per email per 15 minutes. */
+/* Login rate limiting: 5 failures per email+IP per 15 minutes. */
 const FAIL_WINDOW_MS = 15 * 60 * 1000;
 const MAX_FAILS = 5;
 const loginFails = new Map<string, number[]>();
@@ -97,7 +101,7 @@ function recordFail(key: string) {
 /* Step 1: email + password. Returns MFA requirement + enrollment info. */
 export function login(req: Request, res: Response) {
   const { email, password } = req.body || {};
-  const key = String(email || '').toLowerCase();
+  const key = String(email || '').toLowerCase() + '|' + (req.ip || '?');
   if (tooManyFails(key)) {
     audit(null, 'login.rateLimited', 'user', key);
     return res.status(429).json({ error: 'Too many failed attempts — wait 15 minutes and try again.' });

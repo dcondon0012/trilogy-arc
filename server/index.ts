@@ -35,6 +35,14 @@ const app = express();
 // Behind a TLS-terminating reverse proxy (Caddy/ALB): trust X-Forwarded-* so that
 // (a) secure cookies are actually issued and (b) req.ip is the real client for rate limiting.
 if (process.env.TRUST_PROXY === '1' || process.env.SECURE_COOKIES === '1') app.set('trust proxy', 1);
+// Baseline security headers (a full CSP is future work — inline styles preclude a strict one today).
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieSession({
   name: 'trilogy',

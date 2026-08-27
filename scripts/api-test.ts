@@ -277,6 +277,11 @@ async function main() {
   assert(r.status === 200 && r.data.mfa === 'enroll', 'Miles logs in → MFA enrollment');
   r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(r.data.secret) });
   assert(r.status === 200 && r.data.user.role === 'admin', 'Miles is admin');
+  // Miles was seeded with a temporary password — locked out of the API until he sets his own.
+  r = await call('GET', '/api/admin/users');
+  assert(r.status === 403, 'seeded temp password locked out until changed');
+  r = await call('POST', '/api/auth/change-password', { currentPassword: 'miles123', newPassword: 'milesownpw1' });
+  assert(r.status === 200, 'Miles sets his own password');
   r = await call('GET', '/api/admin/users');
   assert(r.status === 200, 'Miles can use admin endpoints');
 
@@ -656,6 +661,29 @@ async function main() {
   assert(r.status === 200 && r.data.zips === 2, 'manual crosswalk upload parses fixed-width layout');
   r = await call('GET', '/api/fees/lookup?zip=75201');
   assert(r.data.zipKnown === true && r.data.locality?.plus4 === true, 'fixed-width plus-4 flag parsed');
+
+  // ── security hardening ──
+  // a temporary password is not a working API key: locked out until changed
+  r = await call('POST', '/api/admin/users', { name: 'Tara Temp', email: 'tara@trilogymed.com', role: 'coordinator', password: 'temppass99' });
+  assert(r.status === 200, 'temp coordinator created');
+  cookies = [];
+  r = await call('POST', '/api/auth/login', { email: 'tara@trilogymed.com', password: 'temppass99' });
+  const tsecret = r.data.secret;
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(tsecret) });
+  assert(r.status === 200, 'temp user completes MFA');
+  r = await call('GET', '/api/bootstrap');
+  assert(r.status === 403, 'temporary password cannot use the API before being changed');
+  r = await call('POST', '/api/auth/change-password', { currentPassword: 'temppass99', newPassword: 'tarasrealpw1' });
+  assert(r.status === 200, 'temp user sets a real password');
+  r = await call('GET', '/api/bootstrap');
+  assert(r.status === 200, 'API unlocked after password change');
+  cookies = [];
+  r = await call('POST', '/api/auth/login', { email: 'donny@trilogymed.com', password: 'admin123' });
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(secret) });
+  assert(r.status === 200, 'admin back in after hardening checks');
+  r = await call('GET', '/api/admin/export');
+  const usersDump = JSON.stringify(r.data.users || []);
+  assert(r.status === 200 && !usersDump.includes('pwHash') && !usersDump.includes('totpSecret'), 'data export never contains password hashes or TOTP secrets');
 
   // ── CRM (network build) ──
   r = await call('POST', '/api/crm/targets', { name: 'Lone Star Spine & Rehab', kind: 'provider', specialty: 'Chiropractic', market: 'Dallas–Fort Worth', phone: '(214) 555-0100', email: 'office@lonestarspine.com' });

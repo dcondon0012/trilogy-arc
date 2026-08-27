@@ -67,8 +67,10 @@ portal.get('/files/:fid', (req, res) => {
   if (!f) return res.status(404).json({ error: 'Not found' });
   const p = path.join(UPLOAD_DIR, f.id);
   if (!fs.existsSync(p)) return res.status(404).json({ error: 'File missing' });
+  const safeInline = /^(application\/pdf|image\/(png|jpe?g|gif|webp)|text\/plain)$/i.test(f.mime || '');
   res.setHeader('Content-Type', f.mime || 'application/octet-stream');
-  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(f.name)}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Disposition', `${safeInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(f.name)}"`);
   fs.createReadStream(p).pipe(res);
 });
 

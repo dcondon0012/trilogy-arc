@@ -1345,13 +1345,17 @@ api.post('/bills/:bid/attach/:field', upload.single('file'), (req, res) => {
   res.json(fullPatient(b.patientId));
 });
 
+/* Uploaded files render inline only for types that can't carry scripts —
+   anything else (HTML, SVG, unknown) downloads instead of executing on our origin. */
+export const SAFE_INLINE_MIME = /^(application\/pdf|image\/(png|jpe?g|gif|webp)|text\/plain)$/i;
 api.get('/files/:fid', (req, res) => {
   const f = db.prepare('SELECT * FROM files WHERE id=?').get(req.params.fid) as any;
   if (!f) return res.status(404).json({ error: 'Not found' });
   const p = path.join(UPLOAD_DIR, f.id);
   if (!fs.existsSync(p)) return res.status(404).json({ error: 'File missing on disk' });
   res.setHeader('Content-Type', f.mime || 'application/octet-stream');
-  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(f.name)}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Disposition', `${SAFE_INLINE_MIME.test(f.mime || '') ? 'inline' : 'attachment'}; filename="${encodeURIComponent(f.name)}"`);
   fs.createReadStream(p).pipe(res);
 });
 
@@ -1687,14 +1691,17 @@ api.get('/admin/audit', requireAdmin, (_req, res) =>
 
 api.get('/admin/export', requireAdmin, (_req, res) => {
   const dump: any = {};
-  for (const t of ['users', 'counters', 'insurers', 'adjusters', 'ins_contracts', 'providers', 'branches', 'patients', 'outside_bills', 'notes', 'tasks', 'task_comments', 'prov_links', 'bills', 'receipts', 'sent_docs', 'documents', 'files', 'ai_requests', 'widget_prefs'])
+  for (const t of ['users', 'counters', 'insurers', 'adjusters', 'ins_contracts', 'providers', 'branches', 'patients', 'outside_bills', 'notes', 'tasks', 'task_comments', 'prov_links', 'bills', 'receipts', 'sent_docs', 'documents', 'files', 'ai_requests', 'widget_prefs', 'crm_targets', 'crm_contacts', 'crm_activities'])
     dump[t] = db.prepare(`SELECT * FROM ${t}`).all();
+  // Never export credentials: password hashes and TOTP secrets stay in the database.
+  dump.users = dump.users.map(({ pwHash, totpSecret, ...u }: any) => u);
   res.setHeader('Content-Disposition', `attachment; filename="trilogy-export-${new Date().toISOString().slice(0, 10)}.json"`);
   res.json(dump);
 });
 
 api.post('/admin/wipe-demo', requireAdmin, (req, res) => {
-  const tables = ['notes', 'task_comments', 'tasks', 'outside_bills', 'prov_links', 'bills', 'receipts', 'sent_docs', 'documents', 'files', 'patients', 'branches', 'providers', 'ins_contracts', 'adjusters', 'insurers', 'ai_requests', 'audit_log'];
+  // audit_log deliberately NOT wiped — the audit trail survives data resets.
+  const tables = ['notes', 'task_comments', 'tasks', 'outside_bills', 'prov_links', 'bills', 'receipts', 'sent_docs', 'documents', 'files', 'patients', 'branches', 'providers', 'ins_contracts', 'adjusters', 'insurers', 'ai_requests'];
   const wipe = db.transaction(() => { for (const t of tables) db.prepare(`DELETE FROM ${t}`).run(); });
   wipe();
   audit(req.user!, 'admin.wipeDemo');
