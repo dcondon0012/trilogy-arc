@@ -310,7 +310,8 @@ export function scheduleFeeRefresh() {
   const check = () => {
     const last = getMeta('lastOkAt');
     if (last && Date.now() - new Date(last).getTime() < staleDays * 86400000) return;
-    refreshFees('scheduler').catch(() => { /* failure already recorded */ });
+    refreshFees('scheduler').then(r => console.log('[fees] scheduled refresh:', r.ok ? 'ok' : 'FAILED', '—', r.detail))
+      .catch(e => console.log('[fees] scheduled refresh crashed:', e));
   };
   setTimeout(check, 60 * 1000);               // shortly after boot if stale
   setInterval(check, 6 * 60 * 60 * 1000);     // then every 6h (only acts when >7d old)

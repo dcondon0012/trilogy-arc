@@ -55,8 +55,8 @@ app.use(cookieSession({
 app.get('/api/health', (_req, res) => {
   let fees: any = null;
   try {
-    const r = db.prepare('SELECT at, status, year, zips, codes, localities FROM fee_refreshes ORDER BY id DESC LIMIT 1').get() as any;
-    if (r) fees = { status: r.status, at: r.at, year: r.year, codes: r.codes, localities: r.localities, zips: r.zips };
+    const r = db.prepare('SELECT at, status, year, zips, codes, localities, detail FROM fee_refreshes ORDER BY id DESC LIMIT 1').get() as any;
+    if (r) fees = { status: r.status, at: r.at, year: r.year, codes: r.codes, localities: r.localities, zips: r.zips, detail: r.detail };
   } catch { /* table absent on first boot */ }
   res.json({ ok: true, build: BUILD, fees });
 });
