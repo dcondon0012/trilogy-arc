@@ -168,6 +168,110 @@ crm.post('/targets/:id/promote', requireAdmin, (req, res) => {
   res.json({ ok: true, id: newId });
 });
 
+/* ── Prospecting: paste-in candidates, scored and triaged before the pipeline ──
+   The Marrick tool searched Google Places and enriched via Apollo/Seamless; those
+   integrations are parked (no API connections yet). The scored triage flow works
+   today on pasted lists — the search/enrichment buttons light up when wired. */
+
+const PHONE_RE = /(\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})/;
+const URL_RE = /((?:https?:\/\/)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/\S*)?)/i;
+const DROP_RE = /hospital|urgent care|dental|veterinar|emergency room/i;
+
+export function scoreProspect(p: { name: string; phone?: string | null; website?: string | null }) {
+  let score = 35; const flags: string[] = [];
+  if (p.website) { score += 15; } else flags.push('No website');
+  if (p.phone) score += 10; else { score -= 10; flags.push('No phone'); }
+  if (/injur|accident|auto|whiplash/i.test(p.name)) { score += 15; flags.push('Injury focused'); }
+  if (/group|associates|institute|partners|clinics|centers/i.test(p.name)) { score += 12; flags.push('Group or multi site'); }
+  return { score: Math.max(0, Math.min(100, score)), flags };
+}
+
+/** One candidate per line: "Name | address | phone | website" (pipes, tabs, or free-form). */
+export function parseProspects(text: string): Array<{ name: string; address: string | null; phone: string | null; website: string | null; dropped?: string }> {
+  const out: any[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    let rest = line;
+    const phone = (rest.match(PHONE_RE) || [])[1] || null;
+    if (phone) rest = rest.replace(phone, ' ');
+    let website: string | null = null;
+    for (const m of rest.match(new RegExp(URL_RE.source, 'gi')) || []) {
+      if (/\.(com|org|net|health|care|clinic|us)\b/i.test(m)) { website = m; rest = rest.replace(m, ' '); break; }
+    }
+    const parts = rest.split(/\||\t/).map(s => s.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const name = parts[0] || '';
+    if (!name) continue;
+    const address = parts.slice(1).join(', ') || null;
+    if (DROP_RE.test(name)) { out.push({ name, address, phone, website, dropped: 'out of scope (hospital/urgent care/dental)' }); continue; }
+    out.push({ name, address, phone, website });
+  }
+  return out;
+}
+
+crm.get('/prospects', (req, res) => {
+  const market = String(req.query.market || '').trim();
+  const rows = db.prepare(`SELECT * FROM crm_prospects ${market ? 'WHERE market=?' : ''}
+    ORDER BY CASE status WHEN 'new' THEN 0 WHEN 'added' THEN 1 ELSE 2 END, score DESC`).all(...(market ? [market] : [])) as any[];
+  const markets = (db.prepare('SELECT DISTINCT market FROM crm_prospects ORDER BY market').all() as any[]).map(r => r.market);
+  res.json({ prospects: rows.map(r => ({ ...r, flags: JSON.parse(r.flags || '[]') })), markets });
+});
+
+crm.post('/prospects/import', (req, res) => {
+  const market = String(req.body?.market || '').trim();
+  const specialty = String(req.body?.specialty || '').trim() || null;
+  const text = String(req.body?.text || '');
+  if (!market) return res.status(400).json({ error: 'Name the market (e.g. Dallas–Fort Worth)' });
+  if (!text.trim()) return res.status(400).json({ error: 'Paste at least one candidate line' });
+  const parsed = parseProspects(text);
+  const ins = db.prepare(`INSERT INTO crm_prospects(market,specialty,name,address,phone,website,score,flags,status,createdAt,by)
+    VALUES(?,?,?,?,?,?,?,?,'new',?,?)`);
+  let added = 0, dropped = 0, dupes = 0;
+  for (const p of parsed) {
+    if (p.dropped) { dropped++; continue; }
+    const dup = db.prepare('SELECT 1 FROM crm_prospects WHERE lower(name)=lower(?) AND market=?').get(p.name, market)
+      || db.prepare('SELECT 1 FROM crm_targets WHERE lower(name)=lower(?)').get(p.name)
+      || db.prepare('SELECT 1 FROM providers WHERE lower(name)=lower(?)').get(p.name);
+    if (dup) { dupes++; continue; }
+    const { score, flags } = scoreProspect(p);
+    ins.run(market, specialty, p.name, p.address, p.phone, p.website, score, JSON.stringify(flags), nowMST(), req.user!.name);
+    added++;
+  }
+  audit(req.user!, 'crm.prospects.import', 'crm', market, `${added} added, ${dupes} duplicates, ${dropped} out-of-scope`);
+  res.json({ ok: true, added, dupes, dropped });
+});
+
+crm.post('/prospects/:id/add', (req, res) => {
+  const p = db.prepare('SELECT * FROM crm_prospects WHERE id=?').get(req.params.id) as any;
+  if (!p) return res.status(404).json({ error: 'Not found' });
+  if (p.status === 'added') return res.status(400).json({ error: 'Already in the pipeline' });
+  const info = db.prepare(`INSERT INTO crm_targets(kind,name,specialty,market,state,address,phone,website,owner,source,stage,createdAt,updatedAt,by)
+    VALUES('provider',?,?,?,?,?,?,?,?,'prospecting','identify',?,?,?)`)
+    .run(p.name, p.specialty, p.market, 'TX', p.address, p.phone, p.website, req.user!.name, nowMST(), nowMST(), req.user!.name);
+  const targetId = Number(info.lastInsertRowid);
+  logAct(targetId, 'note', `Added from prospecting (${p.market}, score ${p.score})`, req.user!.name);
+  db.prepare("UPDATE crm_prospects SET status='added', targetId=? WHERE id=?").run(targetId, p.id);
+  audit(req.user!, 'crm.prospect.add', 'crm', String(targetId), p.name);
+  res.json({ ok: true, targetId });
+});
+
+crm.post('/prospects/:id/reject', (req, res) => {
+  const p = db.prepare('SELECT * FROM crm_prospects WHERE id=?').get(req.params.id) as any;
+  if (!p) return res.status(404).json({ error: 'Not found' });
+  if (p.status === 'added') return res.status(400).json({ error: 'Already in the pipeline — mark it dead there instead' });
+  const restore = p.status === 'rejected';
+  db.prepare('UPDATE crm_prospects SET status=? WHERE id=?').run(restore ? 'new' : 'rejected', p.id);
+  res.json({ ok: true });
+});
+
+crm.post('/prospects/clear', (req, res) => {
+  const market = String(req.body?.market || '').trim();
+  if (!market) return res.status(400).json({ error: 'Market required' });
+  db.prepare("DELETE FROM crm_prospects WHERE market=? AND status!='added'").run(market);
+  audit(req.user!, 'crm.prospects.clear', 'crm', market);
+  res.json({ ok: true });
+});
+
 /* Reporting: funnel, velocity, touch volume, per-owner. */
 crm.get('/report', (_req, res) => {
   const targets = db.prepare('SELECT * FROM crm_targets').all() as any[];

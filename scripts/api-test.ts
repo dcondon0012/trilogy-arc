@@ -711,6 +711,23 @@ async function main() {
   r = await call('GET', '/api/crm/report');
   assert(Array.isArray(r.data.funnel) && r.data.funnel.length === 7, 'CRM report funnel');
 
+  // prospecting: paste → score → triage → pipeline
+  r = await call('POST', '/api/crm/prospects/import', {
+    market: 'Dallas–Fort Worth', specialty: 'Chiropractic',
+    text: 'Dallas Spine & Injury Group | 4310 Gaston Ave, Dallas | (214) 555-0132 | dallasspine.com\nMercy Hospital Dallas | (214) 555-0100\nLakewood Chiropractic | (214) 555-0177',
+  });
+  assert(r.status === 200 && r.data.added === 2 && r.data.dropped === 1, 'prospect import scores candidates and filters hospitals');
+  r = await call('GET', '/api/crm/prospects?market=' + encodeURIComponent('Dallas–Fort Worth'));
+  const topProspect = r.data.prospects[0];
+  assert(topProspect.name === 'Dallas Spine & Injury Group' && topProspect.score === 87
+    && topProspect.flags.includes('Injury focused') && topProspect.flags.includes('Group or multi site'), 'prospect scoring: injury + group + website + phone = 87');
+  r = await call('POST', '/api/crm/prospects/import', { market: 'Dallas–Fort Worth', text: 'Lakewood Chiropractic | (214) 555-0177' });
+  assert(r.data.added === 0 && r.data.dupes === 1, 'prospect re-import deduplicates');
+  r = await call('POST', `/api/crm/prospects/${topProspect.id}/add`);
+  assert(r.status === 200 && r.data.targetId, 'prospect promotes into the pipeline');
+  r = await call('GET', '/api/crm/workspace');
+  assert(r.data.targets.some((t: any) => t.name === 'Dallas Spine & Injury Group' && t.source === 'prospecting'), 'prospect-sourced target lands in the workspace');
+
   // sales role: fee tool yes, case data never
   r = await call('POST', '/api/admin/users', { name: 'Sam Sales', email: 'sam.sales@trilogymed.com', role: 'sales', password: 'salespass1' });
   assert(r.status === 200, 'admin creates a sales user');

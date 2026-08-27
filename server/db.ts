@@ -291,6 +291,14 @@ db.exec(`CREATE TABLE IF NOT EXISTS crm_activities(
   text TEXT, outcome TEXT, by TEXT
 )`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_crm_act_target ON crm_activities(targetId)`);
+db.exec(`CREATE TABLE IF NOT EXISTS crm_prospects(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  market TEXT NOT NULL, specialty TEXT,
+  name TEXT NOT NULL, address TEXT, phone TEXT, website TEXT,
+  score INTEGER DEFAULT 0, flags TEXT DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','added','rejected')),
+  targetId INTEGER, createdAt TEXT, by TEXT
+)`);
 // One-time: fold the old Growth campaigns into the CRM pipeline.
 if (!db.prepare("SELECT 1 FROM counters WHERE k='mig_crm_campaigns'").get()) {
   const stageMap: Record<string, string> = { identify: 'identify', outreach: 'outreach', negotiating: 'proposal', contracted: 'signed', 'soft-launch': 'live' };
