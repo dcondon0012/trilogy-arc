@@ -645,6 +645,18 @@ async function main() {
   assert(r.data.currentRates === 6 && r.data.currentZips === 3, 'fee status counts current rates and zips');
   assert(r.data.codes.some((c: any) => c.cpt === '20552' && c.review === 1), 'REVIEW-flagged injection codes stay flagged until confirmed');
 
+  // crosswalk parser: header CSV and fixed-width both load through the manual endpoint
+  r = await call('POST', '/api/fees/admin/zip-upload', {
+    text: 'STATE,ZIP CODE,CARRIER,LOCALITY,RURAL,PLUS 4 FLAG\n"TX","75201","04412","11","","0"\n"TX","77706","04412","20","","1"\n"OK","73102","04520","00","","0"',
+  });
+  assert(r.status === 200 && r.data.zips === 2, 'manual crosswalk upload parses header CSV (TX rows only)');
+  r = await call('POST', '/api/fees/admin/zip-upload', {
+    text: 'TX752010441211 01 1020264\nTX790360441299 01 0020264\nOK731020452000 01 0020264',
+  });
+  assert(r.status === 200 && r.data.zips === 2, 'manual crosswalk upload parses fixed-width layout');
+  r = await call('GET', '/api/fees/lookup?zip=75201');
+  assert(r.data.zipKnown === true && r.data.locality?.plus4 === true, 'fixed-width plus-4 flag parsed');
+
   // sales role: fee tool yes, case data never
   r = await call('POST', '/api/admin/users', { name: 'Sam Sales', email: 'sam.sales@trilogymed.com', role: 'sales', password: 'salespass1' });
   assert(r.status === 200, 'admin creates a sales user');

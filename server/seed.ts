@@ -19,6 +19,21 @@ export function ensureCoreUsers() {
   }
 }
 
+/** One-time (per database): with the site gate retired, a seed account still on its
+ *  default password is a real exposure — force those to set a new one at next login. */
+export function flagSeedPasswords() {
+  if (db.prepare("SELECT 1 FROM counters WHERE k='mig_weakpw'").get()) return;
+  const weak: Record<string, string> = {
+    'donny@trilogymed.com': 'admin123', 'nicole@trilogymed.com': 'coord123',
+    'miles@trilogymed.com': 'miles123', 'naul@trilogymed.com': 'naul123', 'perry@trilogymed.com': 'perry123',
+  };
+  for (const [email, pw] of Object.entries(weak)) {
+    const u = db.prepare('SELECT id, pwHash FROM users WHERE lower(email)=lower(?)').get(email) as any;
+    if (u && bcrypt.compareSync(pw, u.pwHash)) db.prepare('UPDATE users SET mustChangePw=1 WHERE id=?').run(u.id);
+  }
+  db.prepare("INSERT INTO counters(k,v) VALUES('mig_weakpw',1)").run();
+}
+
 export function seedIfEmpty(withDemo = true) {
   const hasUsers = (db.prepare('SELECT COUNT(*) c FROM users').get() as any).c > 0;
   if (hasUsers) return false;

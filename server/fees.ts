@@ -157,19 +157,44 @@ async function fetchZipCrosswalk(): Promise<{ fileName: string; rows: Array<{ st
   if (!zipRes.ok) throw new Error(`Crosswalk download returned ${zipRes.status}`);
   const buf = Buffer.from(await zipRes.arrayBuffer());
   const zip = new AdmZip(buf);
-  const entry = zip.getEntries()
+  // The zip carries both ZIP5 (zip→locality — what we want) and ZIP9 (+4 splits).
+  const candidates = zip.getEntries()
     .filter(e => /\.(csv|txt)$/i.test(e.entryName) && !/readme|layout|record/i.test(e.entryName))
-    .sort((a, b) => b.header.size - a.header.size)[0];
+    .sort((a, b) =>
+      (/zip9/i.test(a.entryName) ? 1 : 0) - (/zip9/i.test(b.entryName) ? 1 : 0)
+      || (/zip5/i.test(b.entryName) ? 1 : 0) - (/zip5/i.test(a.entryName) ? 1 : 0)
+      || b.header.size - a.header.size);
+  const entry = candidates[0];
   if (!entry) throw new Error(`Crosswalk zip "${fileName}" has no CSV/TXT inside (entries: ${zip.getEntries().map(e => e.entryName).join(', ')}) — may be Excel-only now; use manual upload`);
-  const rows = parseCrosswalk(entry.getData().toString('utf8'));
-  if (!rows.length) throw new Error(`Parsed 0 Texas rows from ${entry.entryName} — column layout may have changed; use manual upload`);
-  return { fileName, rows };
+  const text = entry.getData().toString('utf8');
+  const rows = parseCrosswalk(text);
+  if (!rows.length) {
+    const sample = text.split(/\r?\n/).filter(l => l.trim()).slice(0, 2).map(l => JSON.stringify(l.slice(0, 90))).join(' · ');
+    throw new Error(`Parsed 0 Texas rows from ${entry.entryName} (entries: ${candidates.map(e => e.entryName).join(', ')}; sample: ${sample}) — layout changed; use manual upload`);
+  }
+  return { fileName: `${fileName} → ${entry.entryName}`, rows };
 }
 
-/** Tolerant parser for the ZIP5 file: header-based if headers exist, positional otherwise. */
+/** Tolerant parser for the ZIP5 file: delimited (header or positional) or fixed-width.
+ *  Fixed-width layout per the CMS record layout: STATE(2) ZIP(5) CARRIER(5) LOCALITY(2)
+ *  RURAL(1) LAB CB LOCALITY(2) RURAL2(1) PLUS4 FLAG(1) PART B IND(1) YEAR/QTR. */
 export function parseCrosswalk(text: string): Array<{ state: string; zip: string; carrier: string; locality: string; plus4: number }> {
   const lines = text.split(/\r?\n/).filter(l => l.trim());
   if (!lines.length) return [];
+  // Fixed-width shape: no commas on the sample data line.
+  if (!lines[Math.min(1, lines.length - 1)].includes(',')) {
+    const out: Array<{ state: string; zip: string; carrier: string; locality: string; plus4: number }> = [];
+    for (const l of lines) {
+      const m = l.match(/^([A-Za-z]{2})(\d{5})(\d{5})(\d{2})(.*)$/);
+      if (!m || m[1].toUpperCase() !== 'TX') continue;
+      const rest = m[5];
+      // plus-4 flag: the single 0/1 sitting right before the trailing year/quarter digits
+      const p4 = rest.match(/([01])\d?\s*\d{5}\s*$/);
+      out.push({ state: 'TX', zip: m[2], carrier: m[3], locality: m[4], plus4: p4 && p4[1] === '1' ? 1 : 0 });
+    }
+    if (out.length) return out;
+    // fall through to delimited parsing if fixed-width found nothing
+  }
   const split = (l: string) => l.split(',').map(c => c.replace(/^"|"$/g, '').trim());
   const first = split(lines[0]);
   const findCol = (want: RegExp) => first.findIndex(h => want.test(h.toUpperCase()));

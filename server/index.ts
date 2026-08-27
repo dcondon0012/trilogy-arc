@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { db, DATA_DIR } from './db.js';
-import { seedIfEmpty, ensureCoreUsers } from './seed.js';
+import { seedIfEmpty, ensureCoreUsers, flagSeedPasswords } from './seed.js';
 import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal } from './auth.js';
 import { api } from './routes.js';
 import { portal } from './portal.js';
@@ -23,6 +23,7 @@ const SESSION_SECRET = process.env.SESSION_SECRET || fs.readFileSync(secretFile,
 
 seedIfEmpty(process.env.TRILOGY_SEED !== 'empty');
 ensureCoreUsers();
+if (process.env.NODE_ENV === 'production') flagSeedPasswords();  // gate retired → no default passwords in production
 seedFeeCodes();
 
 // Deploy verification stamp: the current git commit, readable pre-gate at /api/health.
@@ -45,10 +46,12 @@ app.use(cookieSession({
   maxAge: 12 * 60 * 60 * 1000, // 12h
 }));
 
-/* ── Site gate ─────────────────────────────────────────────────────────
-   One password in front of the entire site (Donny hands it to invited people).
-   Off unless TRILOGY_GATE_PW is set — local use is unchanged. Inbound webhooks
-   bypass it (they carry their own shared secret). Enable at deployment. */
+/* ── Site gate — retired 08/27/2026 by request ────────────────────────
+   The shared gate password is gone: each person's own login is the door
+   (plus login rate limiting; MFA when re-enabled). TRILOGY_GATE_PW in the
+   service file is deliberately ignored; seed accounts still on default
+   passwords are forced to set a real one at next login (flagSeedPasswords).
+   The old gate code lives in git history if it's ever wanted again. */
 /* Pre-gate health check: no data, just liveness + which commit is running.
    Lets deploys be verified from outside without a gate session. The fee block
    is pipeline metadata only (status/date/counts of public Medicare data). */
@@ -61,48 +64,6 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, build: BUILD, fees });
 });
 
-const GATE_PW = process.env.TRILOGY_GATE_PW;
-if (GATE_PW) {
-  const gateFails = new Map<string, { n: number; until: number }>();
-  const gatePage = (msg = '') => `<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>trilogy</title>
-<meta name="robots" content="noindex,nofollow">
-<link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@600&family=Inter+Tight:wght@400;600&display=swap" rel="stylesheet">
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#2C3646;font-family:'Inter Tight',sans-serif}
-.box{background:#F7F6F1;border-radius:16px;padding:40px 44px;width:300px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.35)}
-.logo{font-family:Quicksand,sans-serif;font-weight:600;font-size:30px;color:#3D4A5F;letter-spacing:.5px}
-.logo svg{vertical-align:-2px}
-p{font-size:13px;color:#6B7688;margin:10px 0 22px}
-input{width:100%;box-sizing:border-box;padding:11px 13px;border:1px solid #D9D5C7;border-radius:9px;font-size:15px;text-align:center;letter-spacing:2px}
-button{width:100%;margin-top:12px;padding:11px;border:0;border-radius:9px;background:#3D4A5F;color:#fff;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
-.err{color:#B4453A;font-size:12.5px;margin-top:10px;min-height:16px}</style></head>
-<body><form class="box" method="POST" action="/gate">
-<div class="logo">tril<svg width="19" height="17" viewBox="0 0 200 180"><path d="M100 168 L14 20 L186 20 Z" fill="none" stroke="#45A8E8" stroke-width="30" stroke-linejoin="round"/></svg>gy</div>
-<p>This is a private workspace.<br>Enter the access password you were given.</p>
-<input type="password" name="pw" autofocus autocomplete="off">
-<button>Enter</button><div class="err">${msg}</div></form></body></html>`;
-  app.use(express.urlencoded({ extended: false }));
-  app.use((req, res, next) => {
-    if ((req.session as any)?.gateOk) return next();
-    if (req.path.startsWith('/api/hooks/')) return next();
-    if (req.path === '/gate' && req.method === 'POST') {
-      const ip = req.ip || '?';
-      const f = gateFails.get(ip);
-      if (f && f.n >= 8 && Date.now() < f.until)
-        return res.status(429).send(gatePage('Too many tries — wait 15 minutes.'));
-      const pw = String((req.body as any)?.pw || '');
-      if (pw.length === GATE_PW.length && crypto.timingSafeEqual(Buffer.from(pw), Buffer.from(GATE_PW))) {
-        gateFails.delete(ip);
-        (req.session as any).gateOk = true;
-        return res.redirect('/');
-      }
-      gateFails.set(ip, { n: (f?.n || 0) + 1, until: Date.now() + 15 * 60 * 1000 });
-      return res.status(401).send(gatePage('That’s not it — check the password you were sent.'));
-    }
-    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Gate locked' });
-    return res.status(401).send(gatePage());
-  });
-}
 
 app.post('/api/auth/login', login);
 app.post('/api/auth/mfa', mfa);
