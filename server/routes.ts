@@ -549,6 +549,21 @@ api.get('/deck', (req, res) => {
         chips: [], age: today,
       });
     }
+
+    // 12b · Fee benchmark pipeline failed (admin) — never silently serve stale rates
+    const lastFeeRef = db.prepare('SELECT * FROM fee_refreshes ORDER BY id DESC LIMIT 1').get() as any;
+    if (lastFeeRef?.status === 'failed') {
+      cards.push({
+        id: 'fee-' + lastFeeRef.id, type: '◉ Fee benchmark · refresh failed', stripe: 'red', actor: 'sys',
+        title: 'Medicare fee data refresh failed — rates may be stale', patientId: null, patientName: 'Fee tool',
+        sub: String(lastFeeRef.detail || '').slice(0, 140),
+        outcome: `The fee tool never quietly serves outdated numbers — a human sees every failure.`,
+        recommend: `Open the fee tool status panel; if CMS changed their page, use the manual crosswalk upload.`,
+        tiles: [tile(lastFeeRef.at?.split(',')[0] || '—', 'failed'), tile(String(lastFeeRef.year || '—'), 'year'), tile('CMS', 'source'), tile('—', '')],
+        actions: [{ label: '↻ Retry refresh now', method: 'POST', path: `/fees/admin/refresh`, style: 'primary' }],
+        chips: [], age: today,
+      });
+    }
   }
 
   // 13 · Cost-saver redirect: cheaper preferred equivalent exists for an active link
@@ -903,6 +918,11 @@ api.get('/alerts', (req, res) => {
   const cutoff30 = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const cutoff14 = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
   const alerts: any[] = [];
+  if (req.user!.role === 'admin') {
+    const lastFeeRef = db.prepare('SELECT * FROM fee_refreshes ORDER BY id DESC LIMIT 1').get() as any;
+    if (lastFeeRef?.status === 'failed')
+      alerts.push({ severity: 'high', patientId: 'FEES', patientName: 'Fee tool', text: `Medicare fee refresh failed: ${String(lastFeeRef.detail || '').slice(0, 90)}` });
+  }
   for (const p of pts) {
     for (const t of db.prepare('SELECT * FROM tasks WHERE patientId=? AND due IS NOT NULL AND due<?').all(p.id, today) as any[])
       alerts.push({ severity: 'high', patientId: p.id, patientName: p.name, text: `Overdue task: "${t.title}" (due ${fmtDate(t.due)})` });
@@ -1571,9 +1591,10 @@ api.put('/prefs/:key', (req, res) => {
 
 /* ================= admin: user management ================= */
 api.get('/admin/users', requireAdmin, (_req, res) =>
-  res.json((db.prepare('SELECT id,name,email,role,active,totpSecret,orgId,approved FROM users').all() as any[])
+  res.json((db.prepare('SELECT id,name,email,role,active,totpSecret,orgId,approved,perms FROM users').all() as any[])
     .map(u => ({
       id: u.id, name: u.name, email: u.email, role: u.role, active: u.active,
+      perms: (() => { try { return JSON.parse(u.perms || '[]'); } catch { return []; } })(),
       mfaEnrolled: !!u.totpSecret, approved: u.approved, orgId: u.orgId,
       orgName: u.orgId
         ? ((db.prepare('SELECT name FROM providers WHERE id=?').get(u.orgId) as any)?.name
@@ -1595,7 +1616,7 @@ api.post('/admin/users/:uid/approve', requireAdmin, (req, res) => {
 api.post('/admin/users', requireAdmin, async (req, res) => {
   const { name, email, role, password } = req.body || {};
   if (!String(name || '').trim() || !String(email || '').trim()) return res.status(400).json({ error: 'Name and email required' });
-  if (!['admin', 'coordinator'].includes(role)) return res.status(400).json({ error: 'Role must be admin or coordinator' });
+  if (!['admin', 'coordinator', 'sales'].includes(role)) return res.status(400).json({ error: 'Role must be admin, coordinator, or sales' });
   if (String(password || '').length < 8) return res.status(400).json({ error: 'Temporary password must be at least 8 characters' });
   if (db.prepare('SELECT 1 FROM users WHERE lower(email)=lower(?)').get(email)) return res.status(400).json({ error: 'That email already has an account' });
   const bcrypt = (await import('bcryptjs')).default;
@@ -1613,7 +1634,7 @@ api.patch('/admin/users/:uid', requireAdmin, (req, res) => {
   if (u.id === req.user!.id && ((role && role !== 'admin') || active === 0))
     return res.status(400).json({ error: "You can't demote or deactivate your own account" });
   if (role) {
-    if (!['admin', 'coordinator'].includes(role)) return res.status(400).json({ error: 'Bad role' });
+    if (!['admin', 'coordinator', 'sales'].includes(role)) return res.status(400).json({ error: 'Bad role' });
     db.prepare('UPDATE users SET role=? WHERE id=?').run(role, u.id);
     audit(req.user!, 'admin.user.role', 'user', u.id, role);
   }
@@ -1622,6 +1643,22 @@ api.patch('/admin/users/:uid', requireAdmin, (req, res) => {
     audit(req.user!, active ? 'admin.user.reactivate' : 'admin.user.deactivate', 'user', u.id, u.name);
   }
   res.json({ ok: true });
+});
+
+/* Per-user tool grants (currently: 'fees'). Any admin can grant or revoke. */
+api.post('/admin/users/:uid/perms', requireAdmin, (req, res) => {
+  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.uid) as any;
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  const perm = String(req.body?.perm || '');
+  if (perm !== 'fees') return res.status(400).json({ error: 'Unknown permission' });
+  let perms: string[] = [];
+  try { perms = JSON.parse(u.perms || '[]'); } catch { /* reset */ }
+  const grant = req.body?.grant !== false;
+  perms = perms.filter(p => p !== perm);
+  if (grant) perms.push(perm);
+  db.prepare('UPDATE users SET perms=? WHERE id=?').run(JSON.stringify(perms), u.id);
+  audit(req.user!, grant ? 'admin.user.grantPerm' : 'admin.user.revokePerm', 'user', u.id, `${perm} — ${u.email}`);
+  res.json({ ok: true, perms });
 });
 
 api.post('/admin/users/:uid/reset-password', requireAdmin, async (req, res) => {

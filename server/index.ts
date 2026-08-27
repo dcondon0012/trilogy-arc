@@ -9,7 +9,9 @@ import { seedIfEmpty, ensureCoreUsers } from './seed.js';
 import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal } from './auth.js';
 import { api } from './routes.js';
 import { portal } from './portal.js';
+import { fees, seedFeeCodes, scheduleFeeRefresh } from './fees.js';
 import { nowMST, audit } from './db.js';
+import { execSync } from 'node:child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4000;
@@ -21,6 +23,11 @@ const SESSION_SECRET = process.env.SESSION_SECRET || fs.readFileSync(secretFile,
 
 seedIfEmpty(process.env.TRILOGY_SEED !== 'empty');
 ensureCoreUsers();
+seedFeeCodes();
+
+// Deploy verification stamp: the current git commit, readable pre-gate at /api/health.
+let BUILD = 'unknown';
+try { BUILD = execSync('git rev-parse --short HEAD', { cwd: path.join(__dirname, '..') }).toString().trim(); } catch { /* not a git checkout */ }
 
 const app = express();
 // Behind a TLS-terminating reverse proxy (Caddy/ALB): trust X-Forwarded-* so that
@@ -42,6 +49,10 @@ app.use(cookieSession({
    One password in front of the entire site (Donny hands it to invited people).
    Off unless TRILOGY_GATE_PW is set — local use is unchanged. Inbound webhooks
    bypass it (they carry their own shared secret). Enable at deployment. */
+/* Pre-gate health check: no data, just liveness + which commit is running.
+   Lets deploys be verified from outside without a gate session. */
+app.get('/api/health', (_req, res) => res.json({ ok: true, build: BUILD }));
+
 const GATE_PW = process.env.TRILOGY_GATE_PW;
 if (GATE_PW) {
   const gateFails = new Map<string, { n: number; until: number }>();
@@ -95,7 +106,6 @@ app.get('/api/auth/me', (req, res) => {
   const row = db.prepare('SELECT mustChangePw FROM users WHERE id=?').get(u.id) as any;
   res.json({ user: { ...u, mustChangePw: !!row?.mustChangePw } });
 });
-app.get('/api/health', (_req, res) => res.json({ ok: true, patients: (db.prepare('SELECT COUNT(*) c FROM patients').get() as any).c }));
 
 // Portal self-signup: org names only (no PHI) for the signup dropdown.
 app.get('/api/public/orgs', (_req, res) => res.json({
@@ -123,6 +133,7 @@ app.post('/api/hooks/:channel(email|fax)', express.json({ limit: '45mb' }), (req
 });
 
 app.use('/api/portal', portal);
+app.use('/api/fees', requireAuth, fees);   // fee tool: admins + Sales + per-user grants (guard inside)
 app.use('/api', api);
 
 // Serve built client in production
@@ -147,7 +158,9 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   res.status(500).json({ error: 'Server error' });
 });
 
+scheduleFeeRefresh();
+
 app.listen(PORT, () => {
-  console.log(`Trilogy Platform API on http://localhost:${PORT}`);
+  console.log(`Trilogy Platform API on http://localhost:${PORT} (build ${BUILD})`);
   if (!fs.existsSync(dist)) console.log('Dev mode: run the client with `npm run dev` (vite on :5173)');
 });

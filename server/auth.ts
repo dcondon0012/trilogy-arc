@@ -5,8 +5,9 @@ import { db, audit } from './db.js';
 
 export interface SessionUser {
   id: string; name: string; email: string;
-  role: 'admin' | 'coordinator' | 'provider' | 'carrier';
+  role: 'admin' | 'coordinator' | 'sales' | 'provider' | 'carrier';
   orgId?: string | null; orgRole?: 'admin' | 'worker';
+  perms: string[];
 }
 
 declare global {
@@ -19,8 +20,19 @@ authenticator.options = { window: 1 };
 export function currentUser(req: Request): SessionUser | null {
   const s: any = (req as any).session;
   if (!s?.userId) return null;
-  const u = db.prepare('SELECT id,name,email,role,orgId,orgRole FROM users WHERE id=? AND active=1 AND approved=1').get(s.userId) as SessionUser | undefined;
-  return u ?? null;
+  const u = db.prepare('SELECT id,name,email,role,orgId,orgRole,perms FROM users WHERE id=? AND active=1 AND approved=1').get(s.userId) as any;
+  if (!u) return null;
+  try { u.perms = JSON.parse(u.perms || '[]'); } catch { u.perms = []; }
+  return u as SessionUser;
+}
+
+/** Fee-tool access: admins always, Sales role automatically, anyone else per-user grant. */
+export function canUseFees(u: SessionUser | undefined | null): boolean {
+  return !!u && (u.role === 'admin' || u.role === 'sales' || (u.perms || []).includes('fees'));
+}
+export function requireFees(req: Request, res: Response, next: NextFunction) {
+  if (!canUseFees(req.user)) return res.status(403).json({ error: 'No fee tool access — ask an admin to grant it' });
+  next();
 }
 
 export function requireStaff(req: Request, res: Response, next: NextFunction) {

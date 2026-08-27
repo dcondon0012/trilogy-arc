@@ -1,8 +1,10 @@
 export interface User {
   id: string; name: string; email: string;
-  role: 'admin' | 'coordinator' | 'provider' | 'carrier';
-  mustChangePw?: boolean; orgId?: string | null;
+  role: 'admin' | 'coordinator' | 'sales' | 'provider' | 'carrier';
+  mustChangePw?: boolean; orgId?: string | null; perms?: string[];
 }
+export const canUseFees = (u?: User | null) =>
+  !!u && (u.role === 'admin' || u.role === 'sales' || (u.perms || []).includes('fees'));
 export interface BillItem { id: number; billId: string; cpt: string | null; icd: string | null; units: number; charge: number; modifier: string | null; }
 export interface CaseMessage { id: number; patientId: string; authorName: string; authorType: 'staff' | 'provider' | 'carrier'; text: string; time: string; }
 export interface IntakeItem {

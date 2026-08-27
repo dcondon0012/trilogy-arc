@@ -4,7 +4,7 @@ import { useApp } from '../App';
 import { FormModal } from '../ui';
 import type { AiRequest } from '../types';
 
-interface AdminUser { id: string; name: string; email: string; role: string; active: number; mfaEnrolled: boolean; approved?: number; orgName?: string | null; }
+interface AdminUser { id: string; name: string; email: string; role: string; active: number; mfaEnrolled: boolean; approved?: number; orgName?: string | null; perms?: string[]; }
 interface AuditRow { id: number; time: string; userName: string; action: string; entity: string | null; entityId: string | null; detail: string | null; }
 
 export function AdminScreen() {
@@ -36,6 +36,7 @@ export function AdminScreen() {
         { key: 'name', label: 'Full name*' },
         { key: 'role', label: 'Role / permissions', type: 'select', options: [
           { v: 'coordinator', l: 'Coordinator — day-to-day case work; no financials, stats, audit log, or admin tools' },
+          { v: 'sales', l: 'Sales — Medicare fee tool only; no case data, financials, or admin tools' },
           { v: 'admin', l: 'Admin — everything, incl. financials, business stats, user management' }] },
         { key: 'email', label: 'Email*', type: 'email', full: true },
         { key: 'password', label: 'Temporary password* (8+ chars — they should change it via you resetting after first login)', full: true },
@@ -98,7 +99,7 @@ export function AdminScreen() {
             </div></div>
           <div className="cbody">
             <table><tbody>
-              <tr><th>Name</th><th>Email</th><th>Role</th><th>MFA</th><th>Status</th><th>Actions</th></tr>
+              <tr><th>Name</th><th>Email</th><th>Role</th><th>Fee tool</th><th>MFA</th><th>Status</th><th>Actions</th></tr>
               {users.filter(u => (u.name + u.email + (u.orgName || '') + u.role).toLowerCase().includes(userQ.toLowerCase())).map(u => (
                 <tr key={u.id} style={u.active ? undefined : { opacity: 0.5 }}>
                   <td><b>{u.name}</b>{u.id === boot.user.id && <span className="badge b-blue" style={{ marginLeft: 6 }}>you</span>}</td>
@@ -111,7 +112,17 @@ export function AdminScreen() {
                           style={{ border: '1px solid var(--line)', borderRadius: 6, padding: '4px 6px', fontSize: 12 }}>
                           <option value="admin">Admin</option>
                           <option value="coordinator">Coordinator</option>
+                          <option value="sales">Sales</option>
                         </select>}
+                  </td>
+                  <td>
+                    {u.role === 'admin' || u.role === 'sales'
+                      ? <span className="badge b-green" title={u.role === 'sales' ? 'Sales role always has the fee tool' : 'Admins always have the fee tool'}>✓ auto</span>
+                      : u.role === 'coordinator'
+                        ? ((u.perms || []).includes('fees')
+                          ? <button className="btn sm" onClick={() => act(() => api('POST', `/admin/users/${u.id}/perms`, { perm: 'fees', grant: false }))}>✓ granted — revoke</button>
+                          : <button className="btn sm" onClick={() => act(() => api('POST', `/admin/users/${u.id}/perms`, { perm: 'fees', grant: true }))}>Grant access</button>)
+                        : <span style={{ color: 'var(--muted)' }}>—</span>}
                   </td>
                   <td>{u.mfaEnrolled ? <span className="badge b-green">✓ Enrolled</span> : <span className="badge b-amber">Not set up</span>}</td>
                   <td>{u.active ? <span className="badge b-green">Active</span> : <span className="badge b-red">Deactivated</span>}</td>
@@ -127,7 +138,7 @@ export function AdminScreen() {
                 </tr>))}
             </tbody></table>
             <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 10 }}>
-              Roles are the permission system: <b>Admin</b> sees internal financials, business stats, the audit log, and this panel. <b>Coordinator</b> works cases without any of that. Finer-grained permissions (per-widget, provider/carrier portal roles) come with the hosted deployment.</div>
+              Roles are the permission system: <b>Admin</b> sees internal financials, business stats, the audit log, and this panel. <b>Coordinator</b> works cases without any of that. <b>Sales</b> gets the Medicare fee tool and nothing else — no case data. The Fee tool column grants the tool to individual coordinators.</div>
           </div>
         </div>
       )}

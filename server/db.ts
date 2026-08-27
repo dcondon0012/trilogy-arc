@@ -246,6 +246,56 @@ db.exec(`CREATE TABLE IF NOT EXISTS case_messages(
   text TEXT NOT NULL, time TEXT NOT NULL
 )`);
 
+/* ---------- benchmark fee tool (Medicare PFS, source-swappable) ---------- */
+// Per-user tool grants live in users.perms (JSON array, e.g. ["fees"]).
+migrate("ALTER TABLE users ADD COLUMN perms TEXT DEFAULT '[]'");
+// Add the 'sales' staff role (fee-tool access, no case data). SQLite CHECK constraints
+// can't be altered, so rebuild the table once — same pattern as the portal-roles rebuild.
+const usersSql2 = (db.prepare("SELECT sql FROM sqlite_master WHERE name='users'").get() as any)?.sql || '';
+if (!usersSql2.includes("'sales'")) {
+  db.pragma('foreign_keys = OFF');
+  const rebuild2 = db.transaction(() => {
+    db.exec(`CREATE TABLE users_new(
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
+      pwHash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','coordinator','sales','provider','carrier')),
+      totpSecret TEXT, active INTEGER DEFAULT 1, mustChangePw INTEGER DEFAULT 0,
+      orgId TEXT, approved INTEGER DEFAULT 1, orgRole TEXT DEFAULT 'worker', perms TEXT DEFAULT '[]'
+    )`);
+    db.exec(`INSERT INTO users_new(id,name,email,pwHash,role,totpSecret,active,mustChangePw,orgId,approved,orgRole,perms)
+      SELECT id,name,email,pwHash,role,totpSecret,active,mustChangePw,orgId,approved,orgRole,COALESCE(perms,'[]') FROM users`);
+    db.exec('DROP TABLE users');
+    db.exec('ALTER TABLE users_new RENAME TO users');
+  });
+  rebuild2();
+  db.pragma('foreign_keys = ON');
+}
+db.exec(`CREATE TABLE IF NOT EXISTS fee_meta(k TEXT PRIMARY KEY, v TEXT)`);
+db.exec(`CREATE TABLE IF NOT EXISTS fee_codes(
+  cpt TEXT PRIMARY KEY, category TEXT, description TEXT, notes TEXT,
+  review INTEGER DEFAULT 0, active INTEGER DEFAULT 1
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS fee_refreshes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, by TEXT,
+  source TEXT NOT NULL, year INTEGER, status TEXT NOT NULL CHECK(status IN ('running','ok','failed')),
+  detail TEXT, rvuDataset TEXT, gpciDataset TEXT, zipFile TEXT,
+  codes INTEGER DEFAULT 0, localities INTEGER DEFAULT 0, zips INTEGER DEFAULT 0
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS fee_rates(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, refreshId INTEGER NOT NULL REFERENCES fee_refreshes(id) ON DELETE CASCADE,
+  cpt TEXT NOT NULL, modifier TEXT NOT NULL DEFAULT '', locality TEXT NOT NULL, localityName TEXT,
+  nonfacAmount REAL, facAmount REAL, convFact REAL,
+  workRvu REAL, nonfacPeRvu REAL, facPeRvu REAL, mpRvu REAL,
+  workGpci REAL, peGpci REAL, mpGpci REAL,
+  current INTEGER DEFAULT 1
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_fee_rates_cur ON fee_rates(current, cpt, locality)`);
+db.exec(`CREATE TABLE IF NOT EXISTS fee_zips(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, refreshId INTEGER,
+  zip TEXT NOT NULL, state TEXT NOT NULL, carrier TEXT, locality TEXT NOT NULL,
+  plus4 INTEGER DEFAULT 0, current INTEGER DEFAULT 1
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_fee_zips_cur ON fee_zips(current, zip)`);
+
 // One-time backfill of numeric rates for pre-existing demo branches.
 if (!db.prepare("SELECT 1 FROM counters WHERE k='mig_rates'").get()) {
   const backfill: Array<[string, number, number | null]> = [

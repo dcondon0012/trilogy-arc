@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { QRCodeSVG } from 'qrcode.react';
 import { api } from './api';
 import type { AiRequest, Bootstrap, User, AlertItem } from './types';
-import { initials, STAGES } from './types';
+import { initials, STAGES, canUseFees } from './types';
 import { PrefsCtx, FormModal, TrilogyLogo } from './ui';
 import { Today } from './screens/Today';
 import { CasesPage, CarriersPage, ProvidersPage } from './screens/Lists';
@@ -14,9 +14,10 @@ import { InsurerScreen } from './screens/Insurer';
 import { AdminScreen } from './screens/Admin';
 import { InboxScreen } from './screens/Inbox';
 import { ProviderPortal, CarrierPortal } from './screens/Portal';
+import { FeesPage, SalesShell } from './screens/Fees';
 
 export type Nav =
-  | { screen: 'today' | 'cases' | 'carriers' | 'providers' | 'intel' | 'admin' | 'inbox' | 'home' | 'directory' | 'schedule' | 'growth' }
+  | { screen: 'today' | 'cases' | 'carriers' | 'providers' | 'intel' | 'admin' | 'inbox' | 'home' | 'directory' | 'schedule' | 'growth' | 'fees' }
   | { screen: 'patient' | 'provider' | 'insurance'; id: string };
 
 export const AppCtx = createContext<{ boot: Bootstrap; go: (n: Nav) => void; refresh: () => Promise<void>; }>(null as any);
@@ -224,6 +225,7 @@ function CmdK({ onClose }: { onClose: () => void }) {
   }, [q]);
   const jump = (n: Nav) => { onClose(); go(n); };
   const pages: [string, Nav][] = [['Today', { screen: 'today' }], ['Cases', { screen: 'cases' }], ['Schedule', { screen: 'schedule' }], ['Carriers', { screen: 'carriers' }], ['Providers', { screen: 'providers' }], ['Requests', { screen: 'inbox' }]];
+  if (canUseFees(boot.user)) pages.push(['Fee tool', { screen: 'fees' }]);
   if (boot.user.role === 'admin') pages.push(['Growth', { screen: 'growth' }], ['Intelligence', { screen: 'intel' }], ['Admin', { screen: 'admin' }]);
   return (
     <div className="cmdk" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -320,6 +322,7 @@ export default function App() {
   if (me === null) return <Login onDone={fetchMe} />;
   if (me.role === 'provider') return <ProviderPortal user={me} onLogout={logoutPortal} />;
   if (me.role === 'carrier') return <CarrierPortal user={me} onLogout={logoutPortal} />;
+  if (me.role === 'sales') return <SalesShell user={me} onLogout={logoutPortal} />;
   if (!boot) return null;
 
   const screen = nav.screen === 'home' ? 'today' : nav.screen === 'directory' ? 'cases' : nav.screen;
@@ -339,6 +342,7 @@ export default function App() {
     ['⚕', 'Providers', 'providers'],
     ['📥', 'Requests', 'inbox', inboxCount],
   ];
+  if (canUseFees(boot.user)) NAV.push(['⚖', 'Fee tool', 'fees']);
   if (boot.user.role === 'admin') NAV.push(['⇗', 'Growth', 'growth'], ['◎', 'Intelligence', 'intel'], ['⚙', 'Admin', 'admin']);
 
   return (
@@ -377,7 +381,7 @@ export default function App() {
                     <div className="um" style={{ cursor: 'default', fontWeight: 700 }}>
                       Alerts {boot.user.role === 'coordinator' ? '— your cases' : '— all cases'}</div>
                     {alerts.map((a, i) => (
-                      <div key={i} className="um" onClick={() => go({ screen: 'patient', id: a.patientId })}>
+                      <div key={i} className="um" onClick={() => go(a.patientId === 'FEES' ? { screen: 'fees' } : { screen: 'patient', id: a.patientId })}>
                         <span className={'badge ' + (a.severity === 'high' ? 'b-red' : 'b-amber')} style={{ marginRight: 6 }}>{a.severity === 'high' ? '!' : '•'}</span>
                         <b>{a.patientName}</b> · {a.text}
                       </div>))}
@@ -404,6 +408,7 @@ export default function App() {
               {screen === 'inbox' && <InboxScreen />}
               {screen === 'schedule' && <SchedulePage />}
               {screen === 'growth' && <GrowthPage />}
+              {screen === 'fees' && <FeesPage user={boot.user} />}
               {screen === 'intel' && <IntelPage />}
               {screen === 'admin' && <AdminScreen />}
               {nav.screen === 'patient' && <PatientScreen id={nav.id} />}

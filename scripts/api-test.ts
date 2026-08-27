@@ -608,6 +608,68 @@ async function main() {
   assert(r.data.cards.some((c: any) => c.id.startsWith('ota-')), 'deck chases open one-time agreements');
   assert(r.data.cards.some((c: any) => c.id.startsWith('gap-')), 'deck escalates recurring gaps to growth');
 
+  // ── Medicare fee benchmark tool ──
+  // fixture: real 2026 values for 99213 (two CF rows — engine must pick the non-QP one),
+  // a second code, three TX localities incl. a sub-1.00 work GPCI to prove the floor.
+  r = await call('POST', '/api/fees/test/fixture', {
+    rvu: [
+      { hcpc: '99213', modifier: '', rvu_work: '1.30', full_nfac_pe: '1.46', full_fac_pe: '0.55', rvu_mp: '0.09', conv_fact: '33.5675', proc_stat: 'A' },
+      { hcpc: '99213', modifier: '', rvu_work: '1.30', full_nfac_pe: '1.46', full_fac_pe: '0.55', rvu_mp: '0.09', conv_fact: '33.4009', proc_stat: 'A' },
+      { hcpc: '97110', modifier: '', rvu_work: '0.45', full_nfac_pe: '0.35', full_fac_pe: '0.20', rvu_mp: '0.02', conv_fact: '33.4009', proc_stat: 'A' },
+    ],
+    gpci: [
+      { locality: '0441211', loc_description: 'DALLAS', mac_description: 'TEXAS', gpci_work: '1.009', gpci_pe: '0.996', gpci_mp: '0.858' },
+      { locality: '0441299', loc_description: 'REST OF TEXAS', mac_description: 'TEXAS', gpci_work: '1.000', gpci_pe: '0.949', gpci_mp: '0.903' },
+      { locality: '0441220', loc_description: 'BEAUMONT', mac_description: 'TEXAS', gpci_work: '0.950', gpci_pe: '0.910', gpci_mp: '0.929' },
+    ],
+    zips: [
+      { state: 'TX', zip: '75201', carrier: '04412', locality: '11', plus4: 0 },
+      { state: 'TX', zip: '79936', carrier: '04412', locality: '99', plus4: 0 },
+      { state: 'TX', zip: '77706', carrier: '04412', locality: '20', plus4: 1 },
+    ],
+  });
+  assert(r.status === 200 && r.data.ok, 'fee fixture loaded');
+  r = await call('GET', '/api/fees/lookup?zip=75201');
+  const dallas99213 = r.data.rates.find((x: any) => x.cpt === '99213');
+  assert(r.data.zipKnown === true && dallas99213?.localityName === 'DALLAS', 'fee lookup maps ZIP → locality');
+  assert(dallas99213?.nonfacAmount === 94.96, `formula matches hand-computed Dallas 99213 ($94.96, got $${dallas99213?.nonfacAmount})`);
+  assert(dallas99213?.convFact === 33.4009, 'engine selects the non-QP conversion factor row');
+  r = await call('GET', '/api/fees/lookup?zip=79936');
+  assert(r.data.rates.find((x: any) => x.cpt === '99213')?.nonfacAmount === 92.41, 'Rest of Texas 99213 = $92.41');
+  r = await call('GET', '/api/fees/lookup?zip=77706');
+  assert(r.data.rates.find((x: any) => x.cpt === '99213')?.nonfacAmount === 90.59, 'work GPCI 1.00 floor applied (Beaumont)');
+  assert(r.data.locality?.plus4 === true, 'ZIP+4 split flag surfaces');
+  r = await call('GET', '/api/fees/lookup?zip=99999');
+  assert(r.data.zipKnown === false, 'unknown ZIP reported, not guessed');
+  r = await call('GET', '/api/fees/status');
+  assert(r.data.currentRates === 6 && r.data.currentZips === 3, 'fee status counts current rates and zips');
+  assert(r.data.codes.some((c: any) => c.cpt === '20552' && c.review === 1), 'REVIEW-flagged injection codes stay flagged until confirmed');
+
+  // sales role: fee tool yes, case data never
+  r = await call('POST', '/api/admin/users', { name: 'Sam Sales', email: 'sam.sales@trilogymed.com', role: 'sales', password: 'salespass1' });
+  assert(r.status === 200, 'admin creates a sales user');
+  const salesId = r.data.id;
+  cookies = [];
+  r = await call('GET', '/api/fees/status');
+  assert(r.status === 401, 'fee tool requires sign-in');
+  r = await call('POST', '/api/auth/login', { email: 'sam.sales@trilogymed.com', password: 'salespass1' });
+  const ssecret = r.data.secret;
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(ssecret) });
+  assert(r.status === 200 && r.data.user.role === 'sales', 'sales login');
+  await call('POST', '/api/auth/change-password', { currentPassword: 'salespass1', newPassword: 'salespass2' });
+  r = await call('GET', '/api/fees/lookup?zip=75201');
+  assert(r.status === 200 && r.data.rates.length > 0, 'sales role gets the fee tool automatically');
+  r = await call('GET', '/api/fees/status');
+  assert(r.status === 200, 'sales can read fee status');
+  r = await call('POST', '/api/fees/admin/refresh');
+  assert(r.status === 403, 'sales cannot trigger CMS refresh (admin only)');
+  r = await call('GET', '/api/bootstrap');
+  assert(r.status === 403, 'sales blocked from staff bootstrap (no case data)');
+  r = await call('GET', '/api/patients/PT-10042');
+  assert(r.status === 403, 'sales blocked from patient records');
+  r = await call('GET', '/api/deck');
+  assert(r.status === 403, 'sales blocked from the decision deck');
+
   // role gating: coordinator
   cookies = [];
   r = await call('POST', '/api/auth/login', { email: 'nicole@trilogymed.com', password: 'coord123' });
@@ -622,6 +684,21 @@ async function main() {
   assert(r.status === 403, 'coordinator cannot approve AI requests');
   r = await call('GET', '/api/growth');
   assert(r.status === 403, 'coordinator blocked from growth workspace');
+  r = await call('GET', '/api/fees/lookup?zip=75201');
+  assert(r.status === 403, 'coordinator blocked from fee tool without a grant');
+
+  // admin grants the fee tool per-user → coordinator gets in
+  cookies = [];
+  r = await call('POST', '/api/auth/login', { email: 'donny@trilogymed.com', password: 'admin123' });
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(secret) });
+  assert(r.status === 200, 'admin re-login for grant');
+  r = await call('POST', '/api/admin/users/u2/perms', { perm: 'fees', grant: true });
+  assert(r.status === 200 && r.data.perms.includes('fees'), 'admin grants fee tool to a coordinator');
+  cookies = [];
+  r = await call('POST', '/api/auth/login', { email: 'nicole@trilogymed.com', password: 'coord123' });
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(nsecret) });
+  r = await call('GET', '/api/fees/lookup?zip=75201');
+  assert(r.status === 200 && r.data.rates.length > 0, 'granted coordinator can use the fee tool');
 
   console.log(failures ? `\n${failures} FAILURES` : '\nALL API TESTS PASSED');
   process.exit(failures ? 1 : 0);
