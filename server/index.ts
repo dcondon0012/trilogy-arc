@@ -50,8 +50,16 @@ app.use(cookieSession({
    Off unless TRILOGY_GATE_PW is set — local use is unchanged. Inbound webhooks
    bypass it (they carry their own shared secret). Enable at deployment. */
 /* Pre-gate health check: no data, just liveness + which commit is running.
-   Lets deploys be verified from outside without a gate session. */
-app.get('/api/health', (_req, res) => res.json({ ok: true, build: BUILD }));
+   Lets deploys be verified from outside without a gate session. The fee block
+   is pipeline metadata only (status/date/counts of public Medicare data). */
+app.get('/api/health', (_req, res) => {
+  let fees: any = null;
+  try {
+    const r = db.prepare('SELECT at, status, year, zips, codes, localities FROM fee_refreshes ORDER BY id DESC LIMIT 1').get() as any;
+    if (r) fees = { status: r.status, at: r.at, year: r.year, codes: r.codes, localities: r.localities, zips: r.zips };
+  } catch { /* table absent on first boot */ }
+  res.json({ ok: true, build: BUILD, fees });
+});
 
 const GATE_PW = process.env.TRILOGY_GATE_PW;
 if (GATE_PW) {
