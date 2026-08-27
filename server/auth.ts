@@ -35,6 +35,15 @@ export function requireFees(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+/** CRM access: same model — admins and Sales automatically, per-user grant for others. */
+export function canUseCrm(u: SessionUser | undefined | null): boolean {
+  return !!u && (u.role === 'admin' || u.role === 'sales' || (u.perms || []).includes('crm'));
+}
+export function requireCrm(req: Request, res: Response, next: NextFunction) {
+  if (!canUseCrm(req.user)) return res.status(403).json({ error: 'No CRM access — ask an admin to grant it' });
+  next();
+}
+
 export function requireStaff(req: Request, res: Response, next: NextFunction) {
   if (req.user?.role !== 'admin' && req.user?.role !== 'coordinator')
     return res.status(403).json({ error: 'Staff only' });

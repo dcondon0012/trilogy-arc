@@ -2,12 +2,13 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { QRCodeSVG } from 'qrcode.react';
 import { api } from './api';
 import type { AiRequest, Bootstrap, User, AlertItem } from './types';
-import { initials, STAGES, canUseFees } from './types';
+import { initials, STAGES, canUseFees, canUseCrm } from './types';
 import { PrefsCtx, FormModal, TrilogyLogo } from './ui';
 import { Today } from './screens/Today';
 import { CasesPage, CarriersPage, ProvidersPage } from './screens/Lists';
 import { IntelPage } from './screens/Intel';
-import { SchedulePage, GrowthPage } from './screens/Ops';
+import { SchedulePage } from './screens/Ops';
+import { CrmPage } from './screens/Crm';
 import { PatientScreen } from './screens/Patient';
 import { ProviderScreen } from './screens/Provider';
 import { InsurerScreen } from './screens/Insurer';
@@ -17,7 +18,7 @@ import { ProviderPortal, CarrierPortal } from './screens/Portal';
 import { FeesPage, SalesShell } from './screens/Fees';
 
 export type Nav =
-  | { screen: 'today' | 'cases' | 'carriers' | 'providers' | 'intel' | 'admin' | 'inbox' | 'home' | 'directory' | 'schedule' | 'growth' | 'fees' }
+  | { screen: 'today' | 'cases' | 'carriers' | 'providers' | 'intel' | 'admin' | 'inbox' | 'home' | 'directory' | 'schedule' | 'growth' | 'fees' | 'crm' }
   | { screen: 'patient' | 'provider' | 'insurance'; id: string };
 
 export const AppCtx = createContext<{ boot: Bootstrap; go: (n: Nav) => void; refresh: () => Promise<void>; }>(null as any);
@@ -225,8 +226,9 @@ function CmdK({ onClose }: { onClose: () => void }) {
   }, [q]);
   const jump = (n: Nav) => { onClose(); go(n); };
   const pages: [string, Nav][] = [['Today', { screen: 'today' }], ['Cases', { screen: 'cases' }], ['Schedule', { screen: 'schedule' }], ['Carriers', { screen: 'carriers' }], ['Providers', { screen: 'providers' }], ['Requests', { screen: 'inbox' }]];
+  if (canUseCrm(boot.user)) pages.push(['CRM', { screen: 'crm' }]);
   if (canUseFees(boot.user)) pages.push(['Fee tool', { screen: 'fees' }]);
-  if (boot.user.role === 'admin') pages.push(['Growth', { screen: 'growth' }], ['Intelligence', { screen: 'intel' }], ['Admin', { screen: 'admin' }]);
+  if (boot.user.role === 'admin') pages.push(['Intelligence', { screen: 'intel' }], ['Admin', { screen: 'admin' }]);
   return (
     <div className="cmdk" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="cmdk-box">
@@ -322,10 +324,10 @@ export default function App() {
   if (me === null) return <Login onDone={fetchMe} />;
   if (me.role === 'provider') return <ProviderPortal user={me} onLogout={logoutPortal} />;
   if (me.role === 'carrier') return <CarrierPortal user={me} onLogout={logoutPortal} />;
-  if (me.role === 'sales') return <SalesShell user={me} onLogout={logoutPortal} />;
+  if (me.role === 'sales') return <SalesShell user={me} onLogout={logoutPortal} crm={<CrmPage user={me} />} />;
   if (!boot) return null;
 
-  const screen = nav.screen === 'home' ? 'today' : nav.screen === 'directory' ? 'cases' : nav.screen;
+  const screen = nav.screen === 'home' ? 'today' : nav.screen === 'directory' ? 'cases' : nav.screen === 'growth' ? 'crm' : nav.screen;
   const go = (n: Nav) => { setNav(n); setMenu(false); setAlertsOpen(false); setCmdk(false); loadAlerts(); window.scrollTo(0, 0); };
   const logout = async () => { await api('POST', '/auth/logout'); location.reload(); };
   const wipe = async () => {
@@ -342,8 +344,9 @@ export default function App() {
     ['⚕', 'Providers', 'providers'],
     ['📥', 'Requests', 'inbox', inboxCount],
   ];
+  if (canUseCrm(boot.user)) NAV.push(['⇗', 'CRM', 'crm']);
   if (canUseFees(boot.user)) NAV.push(['⚖', 'Fee tool', 'fees']);
-  if (boot.user.role === 'admin') NAV.push(['⇗', 'Growth', 'growth'], ['◎', 'Intelligence', 'intel'], ['⚙', 'Admin', 'admin']);
+  if (boot.user.role === 'admin') NAV.push(['◎', 'Intelligence', 'intel'], ['⚙', 'Admin', 'admin']);
 
   return (
     <AppCtx.Provider value={{ boot, go, refresh }}>
@@ -407,7 +410,7 @@ export default function App() {
               {screen === 'providers' && <ProvidersPage />}
               {screen === 'inbox' && <InboxScreen />}
               {screen === 'schedule' && <SchedulePage />}
-              {screen === 'growth' && <GrowthPage />}
+              {screen === 'crm' && <CrmPage user={boot.user} />}
               {screen === 'fees' && <FeesPage user={boot.user} />}
               {screen === 'intel' && <IntelPage />}
               {screen === 'admin' && <AdminScreen />}

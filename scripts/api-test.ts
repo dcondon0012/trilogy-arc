@@ -643,7 +643,7 @@ async function main() {
   assert(r.data.zipKnown === false, 'unknown ZIP reported, not guessed');
   r = await call('GET', '/api/fees/status');
   assert(r.data.currentRates === 6 && r.data.currentZips === 3, 'fee status counts current rates and zips');
-  assert(r.data.codes.some((c: any) => c.cpt === '20552' && c.review === 1), 'REVIEW-flagged injection codes stay flagged until confirmed');
+  assert(!r.data.codes.some((c: any) => c.cpt === '20552' || c.cpt === '20553'), 'trigger-point injection codes removed (out of clinical scope)');
 
   // crosswalk parser: header CSV and fixed-width both load through the manual endpoint
   r = await call('POST', '/api/fees/admin/zip-upload', {
@@ -656,6 +656,32 @@ async function main() {
   assert(r.status === 200 && r.data.zips === 2, 'manual crosswalk upload parses fixed-width layout');
   r = await call('GET', '/api/fees/lookup?zip=75201');
   assert(r.data.zipKnown === true && r.data.locality?.plus4 === true, 'fixed-width plus-4 flag parsed');
+
+  // ── CRM (network build) ──
+  r = await call('POST', '/api/crm/targets', { name: 'Lone Star Spine & Rehab', kind: 'provider', specialty: 'Chiropractic', market: 'Dallas–Fort Worth', phone: '(214) 555-0100', email: 'office@lonestarspine.com' });
+  assert(r.status === 200 && r.data.id, 'CRM target created');
+  const crmId = r.data.id;
+  r = await call('POST', '/api/crm/targets', { name: 'lone star spine & rehab' });
+  assert(r.status === 400, 'duplicate CRM target rejected (case-insensitive)');
+  r = await call('POST', `/api/crm/targets/${crmId}/activity`, { kind: 'call', text: 'Spoke with office manager', outcome: 'conversation', nextAt: '2026-09-02', nextNote: 'Send rate sheet' });
+  assert(r.status === 200 && r.data.target.nextAt === '2026-09-02', 'CRM call logged and follow-up booked');
+  r = await call('POST', `/api/crm/targets/${crmId}/contacts`, { name: 'Dana Cole', title: 'Office manager', phone: '(214) 555-0101' });
+  assert(r.status === 200 && r.data.target.contacts.length === 1, 'CRM contact added');
+  r = await call('POST', `/api/crm/targets/${crmId}/stage`, { stage: 'signed' });
+  assert(r.status === 200, 'CRM stage advanced');
+  r = await call('GET', `/api/crm/targets/${crmId}`);
+  assert(r.data.stage === 'signed' && r.data.activities.some((a: any) => a.kind === 'stage'), 'stage change recorded on the timeline');
+  r = await call('GET', '/api/crm/workspace');
+  assert(r.data.targets.some((t: any) => t.id === crmId) && r.data.stats.byStage.signed >= 1 && Array.isArray(r.data.signals), 'CRM workspace payload');
+  r = await call('POST', `/api/crm/targets/${crmId}/promote`);
+  assert(r.status === 200 && /^MD-\d+/.test(r.data.id), 'signed target promotes into the provider network');
+  const promotedId = r.data.id;
+  r = await call('GET', `/api/providers/${promotedId}/stats`);
+  assert(r.status === 200, 'promoted provider exists in operations');
+  r = await call('POST', `/api/crm/targets/${crmId}/promote`);
+  assert(r.status === 400, 'double promotion rejected');
+  r = await call('GET', '/api/crm/report');
+  assert(Array.isArray(r.data.funnel) && r.data.funnel.length === 7, 'CRM report funnel');
 
   // sales role: fee tool yes, case data never
   r = await call('POST', '/api/admin/users', { name: 'Sam Sales', email: 'sam.sales@trilogymed.com', role: 'sales', password: 'salespass1' });
@@ -675,6 +701,12 @@ async function main() {
   assert(r.status === 200, 'sales can read fee status');
   r = await call('POST', '/api/fees/admin/refresh');
   assert(r.status === 403, 'sales cannot trigger CMS refresh (admin only)');
+  r = await call('GET', '/api/crm/workspace');
+  assert(r.status === 200 && Array.isArray(r.data.targets), 'sales role gets the CRM automatically');
+  r = await call('POST', '/api/crm/targets', { name: 'Hill Country PT Group', kind: 'provider', market: 'Austin' });
+  assert(r.status === 200, 'sales can add CRM targets');
+  r = await call('POST', `/api/crm/targets/${r.data.id}/promote`);
+  assert(r.status === 403, 'sales cannot promote into the operational network (admin only)');
   r = await call('GET', '/api/bootstrap');
   assert(r.status === 403, 'sales blocked from staff bootstrap (no case data)');
   r = await call('GET', '/api/patients/PT-10042');
@@ -698,6 +730,8 @@ async function main() {
   assert(r.status === 403, 'coordinator blocked from growth workspace');
   r = await call('GET', '/api/fees/lookup?zip=75201');
   assert(r.status === 403, 'coordinator blocked from fee tool without a grant');
+  r = await call('GET', '/api/crm/workspace');
+  assert(r.status === 403, 'coordinator blocked from CRM without a grant');
 
   // admin grants the fee tool per-user → coordinator gets in
   cookies = [];

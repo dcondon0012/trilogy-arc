@@ -1,14 +1,20 @@
-/* ═══════════════ TRILOGY 2.0 — warm editorial design system ═══════════════ */
+/* ═══════════════ TRILOGY 2.0 — warm editorial design system ═══════════════
+   Palette per Trilogy_Brand_Guidelines v1.0 (08/2026):
+   Slate #3E4A62 · bg Slate #2D3647 · Teal #45A8EB · Teal Deep #1476B8 (small
+   text on light — plain Teal is fill-only, 2.6:1) · Marigold #F5A623 (rare
+   accent; never as text on light — use the darkened #B07514 for text) · Paper
+   #F7F6F1. Green/red stay as functional status colors outside the brand kit. */
 :root{
   --paper:#F7F6F1; --card:#FFFFFF;
   --ink:#16202E; --ink-soft:#5A6474; --ink-mute:#8B93A3;
-  --slate:#3D4A5F; --slate-deep:#2C3646; --slate-soft:#55657D;
-  --blue:#45A8E8; --blue-dark:#2B85C4; --blue-pale:#E8F3FC;
+  --slate:#3E4A62; --slate-deep:#2D3647; --slate-soft:#55657D;
+  --blue:#45A8EB; --blue-dark:#1476B8; --blue-pale:#E8F3FC;
   --green:#5E9E44; --green-soft:#EDF4E6; --green-dark:#47792F;
-  --amber:#D89B2C; --amber-soft:#FBF2DE;
+  --amber:#C07E10; --amber-soft:#FDF1DC;
   --red:#C24545; --red-soft:#F9E9E9;
   --purple:#7c3aed; --purple-soft:#f1eafe;
-  --yellow:#B98900; --yellow-soft:#FAF3DC;
+  --marigold:#F5A623;
+  --yellow:#B07514; --yellow-soft:#FDF1DC;
   --line:#E5E2D6; --line-soft:#EFEDE2;
   --accent:var(--blue); --accent-soft:var(--blue-pale);
   --sh-sm:0 1px 2px rgba(44,54,70,.06); --sh-md:0 2px 8px rgba(44,54,70,.08);

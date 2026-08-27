@@ -5,6 +5,8 @@ export interface User {
 }
 export const canUseFees = (u?: User | null) =>
   !!u && (u.role === 'admin' || u.role === 'sales' || (u.perms || []).includes('fees'));
+export const canUseCrm = (u?: User | null) =>
+  !!u && (u.role === 'admin' || u.role === 'sales' || (u.perms || []).includes('crm'));
 export interface BillItem { id: number; billId: string; cpt: string | null; icd: string | null; units: number; charge: number; modifier: string | null; }
 export interface CaseMessage { id: number; patientId: string; authorName: string; authorType: 'staff' | 'provider' | 'carrier'; text: string; time: string; }
 export interface IntakeItem {

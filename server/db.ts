@@ -269,6 +269,43 @@ if (!usersSql2.includes("'sales'")) {
   rebuild2();
   db.pragma('foreign_keys = ON');
 }
+/* ---------- CRM (network build) — absorbs the old Growth workspace ---------- */
+db.exec(`CREATE TABLE IF NOT EXISTS crm_targets(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL DEFAULT 'provider' CHECK(kind IN ('provider','carrier')),
+  name TEXT NOT NULL, specialty TEXT, market TEXT, state TEXT,
+  address TEXT, phone TEXT, email TEXT, website TEXT,
+  owner TEXT, source TEXT,
+  stage TEXT NOT NULL DEFAULT 'identify' CHECK(stage IN ('identify','outreach','conversation','meeting','proposal','signed','live','dead')),
+  proposedRate TEXT, acceptedRate TEXT, notes TEXT,
+  nextAt TEXT, nextNote TEXT, promotedId TEXT,
+  createdAt TEXT, updatedAt TEXT, by TEXT
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS crm_contacts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, targetId INTEGER NOT NULL REFERENCES crm_targets(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, title TEXT, phone TEXT, email TEXT, notes TEXT, isPrimary INTEGER DEFAULT 0
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS crm_activities(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, targetId INTEGER NOT NULL REFERENCES crm_targets(id) ON DELETE CASCADE,
+  at TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('call','email','meeting','note','stage')),
+  text TEXT, outcome TEXT, by TEXT
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_crm_act_target ON crm_activities(targetId)`);
+// One-time: fold the old Growth campaigns into the CRM pipeline.
+if (!db.prepare("SELECT 1 FROM counters WHERE k='mig_crm_campaigns'").get()) {
+  const stageMap: Record<string, string> = { identify: 'identify', outreach: 'outreach', negotiating: 'proposal', contracted: 'signed', 'soft-launch': 'live' };
+  try {
+    for (const c of db.prepare('SELECT * FROM campaigns').all() as any[]) {
+      db.prepare(`INSERT INTO crm_targets(kind,name,market,source,stage,notes,owner,createdAt,updatedAt,by)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`)
+        .run(c.kind === 'carrier' ? 'carrier' : 'provider', c.name, c.region || null, 'growth-workspace',
+          stageMap[c.stage] || 'identify', [c.contact, c.notes].filter(Boolean).join(' · ') || null,
+          c.by || null, c.updatedAt || null, c.updatedAt || null, c.by || null);
+    }
+  } catch { /* campaigns table empty or absent */ }
+  db.prepare("INSERT INTO counters(k,v) VALUES('mig_crm_campaigns',1)").run();
+}
+
 db.exec(`CREATE TABLE IF NOT EXISTS fee_meta(k TEXT PRIMARY KEY, v TEXT)`);
 db.exec(`CREATE TABLE IF NOT EXISTS fee_codes(
   cpt TEXT PRIMARY KEY, category TEXT, description TEXT, notes TEXT,

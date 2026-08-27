@@ -221,7 +221,7 @@ function FeeAdminPanel({ status, reload }: { status: any; reload: () => void }) 
             <tr><th>Code</th><th>Category</th><th>Description</th><th></th></tr>
             {status.codes.map((c: any) => (
               <tr key={c.cpt} style={c.active ? undefined : { opacity: 0.45 }}>
-                <td className="mono">{c.cpt}</td>
+                <td className="mono" style={{ whiteSpace: 'nowrap' }}>{c.cpt}</td>
                 <td style={{ fontSize: 12 }}>{c.category}</td>
                 <td style={{ fontSize: 12 }}>{c.description}
                   {!!c.review && <span className="badge b-amber" style={{ marginLeft: 6 }} title={c.notes}>REVIEW</span>}</td>
@@ -246,19 +246,24 @@ function FeeAdminPanel({ status, reload }: { status: any; reload: () => void }) 
   );
 }
 
-/* ── standalone shell for Sales-role users (no case data, just the tool) ── */
-export function SalesShell({ user, onLogout }: { user: User; onLogout: () => void }) {
+/* ── standalone shell for Sales-role users (CRM + fee tool, no case data) ── */
+export function SalesShell({ user, onLogout, crm }: { user: User; onLogout: () => void; crm: React.ReactNode }) {
+  const [view, setView] = useState<'crm' | 'fees'>('crm');
   return (
     <div style={{ minHeight: '100vh', background: 'var(--paper, #F7F6F1)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 22px', background: 'var(--slate-deep, #2C3646)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 22px', background: 'var(--slate-deep, #2D3647)' }}>
         <TrilogyLogo size={20} light />
-        <span style={{ color: 'rgba(255,255,255,.55)', fontSize: 12 }}>Fee benchmark</span>
+        {(['crm', 'fees'] as const).map(v => (
+          <span key={v} onClick={() => setView(v)}
+            style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600, padding: '4px 10px', borderRadius: 7,
+              color: view === v ? '#fff' : 'rgba(255,255,255,.6)', background: view === v ? 'rgba(255,255,255,.12)' : 'transparent' }}>
+            {v === 'crm' ? 'CRM' : 'Fee tool'}</span>))}
         <span style={{ flex: 1 }} />
         <span style={{ color: 'rgba(255,255,255,.75)', fontSize: 12.5 }}>{user.name} · sales</span>
         <button className="btn sm" onClick={onLogout}>Log out</button>
       </div>
-      <div style={{ maxWidth: 1100, margin: '0 auto', padding: '22px 22px 60px' }}>
-        <FeesPage user={user} />
+      <div style={{ maxWidth: 1180, margin: '0 auto', padding: '22px 22px 60px' }}>
+        {view === 'fees' ? <FeesPage user={user} /> : crm}
       </div>
     </div>
   );

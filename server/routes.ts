@@ -521,7 +521,8 @@ api.get('/deck', (req, res) => {
   if (req.user!.role === 'admin') {
     for (const g of db.prepare(`SELECT providerName, COUNT(*) c, SUM(amount) amt FROM agreements
       GROUP BY providerName HAVING c>=2`).all() as any[]) {
-      const already = db.prepare('SELECT 1 FROM campaigns WHERE name=?').get(g.providerName);
+      const already = db.prepare('SELECT 1 FROM crm_targets WHERE lower(name)=lower(?)').get(g.providerName)
+        || db.prepare('SELECT 1 FROM campaigns WHERE name=?').get(g.providerName);
       if (already) continue;
       cards.push({
         id: 'gap-' + g.providerName.replace(/\W/g, ''), type: '⇗ Network gap · recurring', stripe: 'blue', actor: 'sys',
@@ -529,9 +530,9 @@ api.get('/deck', (req, res) => {
         patientId: null, patientName: 'Growth',
         sub: `${fmt$(g.amt || 0)} routed through one-off paper so far`,
         outcome: `Recurring gaps become contracted network — locked rates replace one-off negotiations.`,
-        recommend: `Send to the Growth queue — Miles picks it up with the volume story attached.`,
+        recommend: `Send to the CRM pipeline — Miles picks it up with the volume story attached.`,
         tiles: [tile(String(g.c), 'agreements'), tile(fmt$(g.amt || 0), 'volume'), tile('gap', 'signal'), tile('—', '')],
-        actions: [{ label: '⇗ Add to Growth queue', method: 'POST', path: `/campaigns`, body: { name: g.providerName, kind: 'provider', stage: 'identify', notes: `${g.c} one-time agreements, ${fmt$(g.amt || 0)} volume — auto-flagged from gap engine` }, style: 'primary' }],
+        actions: [{ label: '⇗ Add to CRM pipeline', method: 'POST', path: `/crm/targets`, body: { name: g.providerName, kind: 'provider', stage: 'identify', source: 'gap-engine', notes: `${g.c} one-time agreements, ${fmt$(g.amt || 0)} volume — auto-flagged from gap engine` }, style: 'primary' }],
         chips: [], age: today,
       });
     }
@@ -1650,7 +1651,7 @@ api.post('/admin/users/:uid/perms', requireAdmin, (req, res) => {
   const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.uid) as any;
   if (!u) return res.status(404).json({ error: 'Not found' });
   const perm = String(req.body?.perm || '');
-  if (perm !== 'fees') return res.status(400).json({ error: 'Unknown permission' });
+  if (!['fees', 'crm'].includes(perm)) return res.status(400).json({ error: 'Unknown permission' });
   let perms: string[] = [];
   try { perms = JSON.parse(u.perms || '[]'); } catch { /* reset */ }
   const grant = req.body?.grant !== false;

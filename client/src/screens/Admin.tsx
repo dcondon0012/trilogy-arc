@@ -36,7 +36,7 @@ export function AdminScreen() {
         { key: 'name', label: 'Full name*' },
         { key: 'role', label: 'Role / permissions', type: 'select', options: [
           { v: 'coordinator', l: 'Coordinator — day-to-day case work; no financials, stats, audit log, or admin tools' },
-          { v: 'sales', l: 'Sales — Medicare fee tool only; no case data, financials, or admin tools' },
+          { v: 'sales', l: 'Sales — CRM and Medicare fee tool only; no case data, financials, or admin tools' },
           { v: 'admin', l: 'Admin — everything, incl. financials, business stats, user management' }] },
         { key: 'email', label: 'Email*', type: 'email', full: true },
         { key: 'password', label: 'Temporary password* (8+ chars — they should change it via you resetting after first login)', full: true },
@@ -99,7 +99,7 @@ export function AdminScreen() {
             </div></div>
           <div className="cbody">
             <table><tbody>
-              <tr><th>Name</th><th>Email</th><th>Role</th><th>Fee tool</th><th>MFA</th><th>Status</th><th>Actions</th></tr>
+              <tr><th>Name</th><th>Email</th><th>Role</th><th>Tools</th><th>MFA</th><th>Status</th><th>Actions</th></tr>
               {users.filter(u => (u.name + u.email + (u.orgName || '') + u.role).toLowerCase().includes(userQ.toLowerCase())).map(u => (
                 <tr key={u.id} style={u.active ? undefined : { opacity: 0.5 }}>
                   <td><b>{u.name}</b>{u.id === boot.user.id && <span className="badge b-blue" style={{ marginLeft: 6 }}>you</span>}</td>
@@ -115,13 +115,19 @@ export function AdminScreen() {
                           <option value="sales">Sales</option>
                         </select>}
                   </td>
-                  <td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
                     {u.role === 'admin' || u.role === 'sales'
-                      ? <span className="badge b-green" title={u.role === 'sales' ? 'Sales role always has the fee tool' : 'Admins always have the fee tool'}>✓ auto</span>
+                      ? <span className="badge b-green" title="Admins and Sales always have the fee tool and CRM">✓ auto</span>
                       : u.role === 'coordinator'
-                        ? ((u.perms || []).includes('fees')
-                          ? <button className="btn sm" onClick={() => act(() => api('POST', `/admin/users/${u.id}/perms`, { perm: 'fees', grant: false }))}>✓ granted — revoke</button>
-                          : <button className="btn sm" onClick={() => act(() => api('POST', `/admin/users/${u.id}/perms`, { perm: 'fees', grant: true }))}>Grant access</button>)
+                        ? (['fees', 'crm'] as const).map(perm => {
+                            const has = (u.perms || []).includes(perm);
+                            const label = perm === 'fees' ? 'Fees' : 'CRM';
+                            return (
+                              <button key={perm} className="btn sm" style={has ? { borderColor: 'var(--green)', color: 'var(--green-dark)', marginRight: 4 } : { marginRight: 4 }}
+                                title={has ? `Revoke ${label}` : `Grant ${label}`}
+                                onClick={() => act(() => api('POST', `/admin/users/${u.id}/perms`, { perm, grant: !has }))}>
+                                {has ? '✓ ' : '+ '}{label}</button>);
+                          })
                         : <span style={{ color: 'var(--muted)' }}>—</span>}
                   </td>
                   <td>{u.mfaEnrolled ? <span className="badge b-green">✓ Enrolled</span> : <span className="badge b-amber">Not set up</span>}</td>
@@ -138,7 +144,7 @@ export function AdminScreen() {
                 </tr>))}
             </tbody></table>
             <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 10 }}>
-              Roles are the permission system: <b>Admin</b> sees internal financials, business stats, the audit log, and this panel. <b>Coordinator</b> works cases without any of that. <b>Sales</b> gets the Medicare fee tool and nothing else — no case data. The Fee tool column grants the tool to individual coordinators.</div>
+              Roles are the permission system: <b>Admin</b> sees internal financials, business stats, the audit log, and this panel. <b>Coordinator</b> works cases without any of that. <b>Sales</b> gets the CRM and the Medicare fee tool and nothing else — no case data. The Tools column grants those tools to individual coordinators.</div>
           </div>
         </div>
       )}

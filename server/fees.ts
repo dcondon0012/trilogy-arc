@@ -75,13 +75,21 @@ const DEFAULT_CODES: Array<[string, string, string, string, number]> = [
   ['72148', 'Imaging', 'MRI lumbar spine w/o contrast', '', 0],
   ['73221', 'Imaging', 'MRI upper extremity joint w/o contrast', '', 0],
   ['73721', 'Imaging', 'MRI lower extremity joint w/o contrast', '', 0],
-  ['20552', 'Injection', 'Trigger point injection - 1-2 muscles', 'REVIEW: confirm in-scope under soft-tissue-only clinical policy', 1],
-  ['20553', 'Injection', 'Trigger point injection - 3+ muscles', 'REVIEW: confirm in-scope under soft-tissue-only clinical policy', 1],
+  // 20552/20553 (trigger point injections) removed 08/27/2026 — Donny ruled them
+  // outside the soft-tissue-only clinical scope. Re-add via the admin panel if that changes.
 ];
 export function seedFeeCodes() {
-  if ((db.prepare('SELECT COUNT(*) c FROM fee_codes').get() as any).c > 0) return;
-  const ins = db.prepare('INSERT INTO fee_codes(cpt,category,description,notes,review,active) VALUES(?,?,?,?,?,1)');
-  for (const [cpt, cat, desc, notes, review] of DEFAULT_CODES) ins.run(cpt, cat, desc, notes, review);
+  if ((db.prepare('SELECT COUNT(*) c FROM fee_codes').get() as any).c === 0) {
+    const ins = db.prepare('INSERT INTO fee_codes(cpt,category,description,notes,review,active) VALUES(?,?,?,?,?,1)');
+    for (const [cpt, cat, desc, notes, review] of DEFAULT_CODES) ins.run(cpt, cat, desc, notes, review);
+  }
+  // One-time cleanup on databases seeded before the scope decision.
+  if (!db.prepare("SELECT 1 FROM counters WHERE k='mig_tpi_removed'").get()) {
+    db.prepare("DELETE FROM fee_codes WHERE cpt IN ('20552','20553')").run();
+    db.prepare("UPDATE fee_rates SET current=0 WHERE cpt IN ('20552','20553')").run();
+    db.prepare("INSERT INTO counters(k,v) VALUES('mig_tpi_removed',1)").run();
+    audit(null, 'fees.code.removed', 'fees', '20552,20553', 'Out of clinical scope — decision 08/27/2026');
+  }
 }
 
 /* ---------- DKAN API client ---------- */

@@ -10,6 +10,7 @@ import { login, mfa, logout, requireAuth, currentUser, changePassword, registerP
 import { api } from './routes.js';
 import { portal } from './portal.js';
 import { fees, seedFeeCodes, scheduleFeeRefresh } from './fees.js';
+import { crm } from './crm.js';
 import { nowMST, audit } from './db.js';
 import { execSync } from 'node:child_process';
 
@@ -103,6 +104,7 @@ app.post('/api/hooks/:channel(email|fax)', express.json({ limit: '45mb' }), (req
 
 app.use('/api/portal', portal);
 app.use('/api/fees', requireAuth, fees);   // fee tool: admins + Sales + per-user grants (guard inside)
+app.use('/api/crm', requireAuth, crm);     // CRM: same access model (guard inside)
 app.use('/api', api);
 
 // Serve built client in production

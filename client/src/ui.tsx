@@ -10,7 +10,7 @@ export function TrilogyLogo({ size = 22, light = false }: { size?: number; light
     <span className="tlogo" style={{ fontSize: size, color: ink }}>
       tril
       <svg className="tri" width={tri} height={tri} viewBox="0 0 100 100" style={{ margin: `0 ${size * 0.06}px` }}>
-        <path d="M14 18 L86 18 L50 84 Z" fill="none" stroke="#45A8E8" strokeWidth="17" strokeLinejoin="round" />
+        <path d="M14 18 L86 18 L50 84 Z" fill="none" stroke="#45A8EB" strokeWidth="17" strokeLinejoin="round" />
       </svg>
       gy
     </span>
