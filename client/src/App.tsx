@@ -132,7 +132,7 @@ function Login({ onDone }: { onDone: () => void }) {
           {location.hostname === 'localhost' && <div className="demobox"><b>Demo accounts</b><br />
             Admin: donny@trilogymed.com / admin123<br />
             Coordinator: nicole@trilogymed.com / coord123</div>}
-          <div className="secnote">🔒 Encrypted sessions · full audit log · MFA at launch</div>
+          <div className="secnote">Encrypted sessions · full audit log · MFA at launch</div>
           <div className="secnote">Provider or carrier? <span className="link" onClick={() => setSignup(true)}>Request portal access</span></div>
         </>)}
         {step === 'enroll' && (<>
@@ -182,7 +182,7 @@ export function SearchBox({ big }: { big?: boolean }) {
   const pick = (n: Nav) => { setQ(''); setRes(null); go(n); };
   return (
     <div className={big ? 'bigsearch' : 'searchwrap'} style={{ position: 'relative' }}>
-      <span className="sicon" style={big ? { position: 'absolute', left: 12, top: 12 } : undefined}>🔍</span>
+      <span className="sicon" style={big ? { position: 'absolute', left: 12, top: 12 } : undefined}>⌕</span>
       <input className="search" style={big ? { padding: '12px 14px 12px 36px', fontSize: 15 } : undefined}
         placeholder="Search patients, providers, carriers…" value={q} onChange={e => run(e.target.value)} />
       {res && (
@@ -260,10 +260,10 @@ function AiWidget({ user }: { user: User }) {
   useEffect(() => { if (open) api('GET', '/ai').then(setList); }, [open]);
   const submit = async () => { if (!text.trim()) return; setList(await api('POST', '/ai', { text })); setText(''); };
   const decide = async (id: number, status: string) => setList(await api('POST', `/ai/${id}/decide`, { status }));
-  if (!open) return <button className="aifab" title="AI site editor" onClick={() => setOpen(true)}>✨</button>;
+  if (!open) return <button className="aifab" title="AI site editor" onClick={() => setOpen(true)}>AI</button>;
   return (
     <div className="aipanel">
-      <div className="aihead"><b>✨ Site change requests</b>
+      <div className="aihead"><b>Site change requests</b>
         <span style={{ cursor: 'pointer', fontSize: 18 }} onClick={() => setOpen(false)}>✕</span></div>
       <div className="aibody">
         <div style={{ fontSize: 12, color: 'var(--ink-soft)', marginBottom: 8 }}>Describe a change; an admin reviews before it goes live.</div>
@@ -339,10 +339,10 @@ export default function App() {
   const NAV: [string, string, Nav['screen'], number?][] = [
     ['◈', 'Today', 'today'],
     ['▤', 'Cases', 'cases'],
-    ['📅', 'Schedule', 'schedule'],
-    ['🛡', 'Carriers', 'carriers'],
-    ['⚕', 'Providers', 'providers'],
-    ['📥', 'Requests', 'inbox', inboxCount],
+    ['◷', 'Schedule', 'schedule'],
+    ['⬡', 'Carriers', 'carriers'],
+    ['✚', 'Providers', 'providers'],
+    ['⇩', 'Requests', 'inbox', inboxCount],
   ];
   if (canUseCrm(boot.user)) NAV.push(['⇗', 'CRM', 'crm']);
   if (canUseFees(boot.user)) NAV.push(['⚖', 'Fee tool', 'fees']);
@@ -377,7 +377,7 @@ export default function App() {
               <span className="spacer" />
               <div style={{ position: 'relative' }}>
                 <button className="btn sm" onClick={() => setAlertsOpen(o => !o)} title="Alerts">
-                  🔔{alerts.length > 0 && <span className={'badge ' + (high ? 'b-red' : 'b-amber')} style={{ marginLeft: 4 }}>{alerts.length}</span>}
+                  Alerts{alerts.length > 0 && <span className={'badge ' + (high ? 'b-red' : 'b-amber')} style={{ marginLeft: 4 }}>{alerts.length}</span>}
                 </button>
                 {alertsOpen && (
                   <div className="usermenu" style={{ right: 0, top: 40, minWidth: 380, maxHeight: 420, overflowY: 'auto' }}>
@@ -388,7 +388,7 @@ export default function App() {
                         <span className={'badge ' + (a.severity === 'high' ? 'b-red' : 'b-amber')} style={{ marginRight: 6 }}>{a.severity === 'high' ? '!' : '•'}</span>
                         <b>{a.patientName}</b> · {a.text}
                       </div>))}
-                    {!alerts.length && <div className="um" style={{ cursor: 'default', color: 'var(--ink-mute)' }}>All clear 🎉</div>}
+                    {!alerts.length && <div className="um" style={{ cursor: 'default', color: 'var(--ink-mute)' }}>All clear </div>}
                   </div>)}
               </div>
               <span className="rolechip">{boot.user.role}</span>
@@ -396,9 +396,9 @@ export default function App() {
               {menu && (
                 <div className="usermenu">
                   <div className="um" style={{ cursor: 'default', fontWeight: 700 }}>{boot.user.name} — {boot.user.email}</div>
-                  <div className="um" onClick={() => { setPwModal(true); setMenu(false); }}>🔑 Change my password</div>
-                  {boot.user.role === 'admin' && <div className="um" onClick={() => { window.open('/api/admin/export'); setMenu(false); }}>⬇ Export data backup</div>}
-                  {boot.user.role === 'admin' && <div className="um" style={{ color: 'var(--red)' }} onClick={wipe}>🗑 Wipe demo data</div>}
+                  <div className="um" onClick={() => { setPwModal(true); setMenu(false); }}>Change my password</div>
+                  {boot.user.role === 'admin' && <div className="um" onClick={() => { window.open('/api/admin/export'); setMenu(false); }}>↓ Export data backup</div>}
+                  {boot.user.role === 'admin' && <div className="um" style={{ color: 'var(--red)' }} onClick={wipe}>Wipe demo data</div>}
                   <div className="um" onClick={logout}>Log out</div>
                 </div>)}
             </div>

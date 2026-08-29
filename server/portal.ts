@@ -88,7 +88,7 @@ portal.post('/messages/:pid', (req, res) => {
   if (!text || text.length > 5000) return res.status(400).json({ error: 'Message required (max 5,000 chars)' });
   db.prepare('INSERT INTO case_messages(patientId,authorName,authorType,text,time) VALUES(?,?,?,?,?)')
     .run(req.params.pid, req.user!.name, req.user!.role, text, nowMST());
-  addNote(req.params.pid, `💬 ${req.user!.role === 'provider' ? 'Provider' : 'Carrier'} message from ${req.user!.name}: "${text.slice(0, 160)}${text.length > 160 ? '…' : ''}"`, req.user!.name, true, 'portal');
+  addNote(req.params.pid, `${req.user!.role === 'provider' ? 'Provider' : 'Carrier'} message from ${req.user!.name}: "${text.slice(0, 160)}${text.length > 160 ? '…' : ''}"`, req.user!.name, true, 'portal');
   // Every portal message becomes a same-day task for the case coordinator.
   const tid = 't' + Date.now() + Math.floor(Math.random() * 1000);
   db.prepare('INSERT INTO tasks(id,patientId,title,due,created,by) VALUES(?,?,?,?,?,?)')
@@ -176,7 +176,7 @@ portal.post('/provider/submit', upload.fields([{ name: 'bill', maxCount: 1 }, { 
     .run(bid, patientId, orgId, dos || null, Number(amount), rate,
       nfid ? 1 : 0, bfid, billFile.originalname, nfid, noteFile?.originalname || null);
   db.prepare('UPDATE prov_links SET billed=billed+? WHERE patientId=? AND providerId=?').run(Number(amount), patientId, orgId);
-  addNote(patientId, `💬 Bill submitted via provider portal by ${req.user!.name}: ${billType || 'bill'} · DOS ${dos || '?'} · ${fmt$(Number(amount))}${nfid ? ' (visit note attached)' : ' ⚠ no visit note — payment blocked until received'}`, req.user!.name, true, 'portal');
+  addNote(patientId, `Bill submitted via provider portal by ${req.user!.name}: ${billType || 'bill'} · DOS ${dos || '?'} · ${fmt$(Number(amount))}${nfid ? ' (visit note attached)' : ' no visit note — payment blocked until received'}`, req.user!.name, true, 'portal');
   audit(req.user!, 'portal.provider.submitBill', 'bill', bid, `${patientId} ${amount}`);
   res.json({ ok: true, billId: bid, message: nfid ? 'Bill + note received and filed to the patient.' : 'Bill received — send the visit note to unlock payment.' });
 });
@@ -191,7 +191,7 @@ portal.post('/provider/order', upload.single('file'), (req, res) => {
   if (req.file) fid = saveFile(req);
   if (fid) db.prepare('INSERT INTO documents(patientId,name,cat,meta,fileId) VALUES(?,?,?,?,?)')
     .run(patientId, req.file!.originalname, 'Medical', nowMST() + ' · ' + (type || 'order') + ' via portal', fid);
-  addNote(patientId, `💬 ${type === 'estimate' ? 'Estimate' : 'Order'} submitted via portal by ${req.user!.name}: ${details}${amount ? ' · ' + fmt$(Number(amount)) : ''}`, req.user!.name, true, 'portal');
+  addNote(patientId, `${type === 'estimate' ? 'Estimate' : 'Order'} submitted via portal by ${req.user!.name}: ${details}${amount ? ' · ' + fmt$(Number(amount)) : ''}`, req.user!.name, true, 'portal');
   const tid = 't' + Date.now() + Math.floor(Math.random() * 1000);
   db.prepare('INSERT INTO tasks(id,patientId,title,due,created,by) VALUES(?,?,?,?,?,?)')
     .run(tid, patientId, `Review ${type === 'estimate' ? 'estimate' : 'order'} from ${req.user!.name}: ${String(details).slice(0, 80)}`,
@@ -217,7 +217,7 @@ portal.post('/provider/auth-request', (req, res) => {
     db.prepare("UPDATE prov_links SET authAmount=authAmount+?, authCount=authCount+1, status='authorized' WHERE id=?").run(amt, link.id);
     db.prepare('INSERT INTO sent_docs(patientId,name,toStr,time,status,method) VALUES(?,?,?,?,?,?)')
       .run(patientId, "Add'l Authorization (auto — within envelope)", pr.name, nowMST(), 'Sent', 'Email');
-    addNote(patientId, `⚡ Auth auto-approved: ${fmt$(amt)} to ${pr.name} — within the coverage envelope (${fmt$(env.remaining - amt)} remains). No human wait.`, 'system');
+    addNote(patientId, `Auth auto-approved: ${fmt$(amt)} to ${pr.name} — within the coverage envelope (${fmt$(env.remaining - amt)} remains). No human wait.`, 'system');
     audit(req.user!, 'auth.autoApprove', 'patient', patientId, `${amt} to ${pr.name}`);
     return res.json({ ok: true, auto: true, message: `Approved automatically — ${fmt$(amt)} fits the coverage envelope. Authorization is on its way.` });
   }
@@ -328,7 +328,7 @@ portal.post('/provider/appointment', (req, res) => {
   db.prepare('INSERT INTO appointments(patientId,providerId,whenAt,note,createdBy,createdAt) VALUES(?,?,?,?,?,?)')
     .run(patientId, req.user!.orgId, whenAt, note || null, req.user!.name, nowMST());
   const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(req.user!.orgId) as any;
-  addNote(patientId, `💬 Appointment booked by ${pr?.name}: ${whenAt}${note ? ' — ' + note : ''} (reported by ${req.user!.name})`, req.user!.name, true, 'portal');
+  addNote(patientId, `Appointment booked by ${pr?.name}: ${whenAt}${note ? ' — ' + note : ''} (reported by ${req.user!.name})`, req.user!.name, true, 'portal');
   audit(req.user!, 'portal.provider.appointment', 'patient', patientId, whenAt);
   res.json({ ok: true, message: 'Appointment recorded — Trilogy sees it on the case.' });
 });
@@ -374,7 +374,7 @@ portal.post('/carrier/refer', upload.array('files', 10), (req, res) => {
       .run(id, f.originalname, 'Insurance', nowMST() + ' · carrier referral upload', f.filename);
   }
   const carrierName = (db.prepare('SELECT name FROM insurers WHERE id=?').get(orgId) as any)?.name;
-  addNote(id, `💬 Referral submitted via carrier portal by ${req.user!.name} (${carrierName})${claimInfo ? ' — ' + claimInfo : ''}${(req.files as any[])?.length ? ` · ${(req.files as any[]).length} claim document(s) attached` : ''}`, req.user!.name, true, 'portal');
+  addNote(id, `Referral submitted via carrier portal by ${req.user!.name} (${carrierName})${claimInfo ? ' — ' + claimInfo : ''}${(req.files as any[])?.length ? ` · ${(req.files as any[]).length} claim document(s) attached` : ''}`, req.user!.name, true, 'portal');
   // Lands in the New Patient Requests inbox for intake review.
   db.prepare(`INSERT INTO intake_items(channel,kind,status,patientId,fromInfo,note,receivedAt)
     VALUES('portal','referral','triage',?,?,?,?)`)

@@ -58,7 +58,7 @@ export function SchedulePage() {
         </div>
 
         <div className="card">
-          <div className="chead"><h3>⚠ Treating with no next appointment</h3></div>
+          <div className="chead"><h3>Treating with no next appointment</h3></div>
           <div className="cbody">
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
               Drop-out risk: patients who feel forgotten call attorneys. Book the next touchpoint.</div>
@@ -66,7 +66,7 @@ export function SchedulePage() {
               <div key={p.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--line-soft)' }}>
                 <span className="link" style={{ flex: 1 }} onClick={() => go({ screen: 'patient', id: p.id })}><b>{p.name}</b></span>
                 <span className={'badge ' + (p.caseType === 'trilogy' ? 'b-yellow' : 'b-blue')}>{p.caseType === 'trilogy' ? 'BI' : 'PIP'}</span>
-                <button className="btn sm primary" onClick={() => book(p)}>📅 Book</button>
+                <button className="btn sm primary" onClick={() => book(p)}>Book</button>
               </div>))}
             {!data.gaps.length && <div className="badge b-green" style={{ padding: 10 }}>✓ Every treating patient has a next appointment</div>}
           </div>

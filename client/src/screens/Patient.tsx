@@ -5,7 +5,7 @@ import { FormModal, FieldSpec, Widget, statusBadge, cap } from '../ui';
 import type { Patient, Task } from '../types';
 import { STAGES, fmtDate, fmt$, todayISO, initials } from '../types';
 
-type Tab = 'overview' | 'trans' | 'contracts' | 'prov' | 'insurance' | 'docs' | 'map' | 'messages';
+type Tab = 'overview' | 'trans' | 'contracts' | 'prov' | 'insurance' | 'docs' | 'map' | 'messages' | 'fin';
 
 export function PatientScreen({ id }: { id: string }) {
   const { boot, go, refresh } = useApp();
@@ -88,10 +88,10 @@ export function PatientScreen({ id }: { id: string }) {
             <span className="casebadge">{p.caseType === 'trilogy' ? 'TRILOGY · BI' : 'TRILOPAY · PIP'}</span></h2>
           <div className="pt-meta">
             <span className="badge b-blue" style={{ cursor: 'pointer' }} onClick={changeCoordinator}>Coordinator: {coord?.name || '—'} ▾</span>
-            {comp && <span className="badge b-purple" style={{ cursor: 'pointer' }} onClick={() => go({ screen: 'patient', id: comp.id })}>🔗 Companion: {comp.name} · {comp.id}</span>}
+            {comp && <span className="badge b-purple" style={{ cursor: 'pointer' }} onClick={() => go({ screen: 'patient', id: comp.id })}>Companion: {comp.name} · {comp.id}</span>}
           </div>
         </div>
-        <button className="btn sm" onClick={linkCompanion}>🔗 Link companion</button>
+        <button className="btn sm" onClick={linkCompanion}>Link companion</button>
         <button className="btn sm" onClick={editProfile}>✎ Edit profile</button>
       </div>
 
@@ -125,7 +125,8 @@ export function PatientScreen({ id }: { id: string }) {
       })()}
 
       <div className="tabs">
-        {([['overview', 'Overview'], ['trans', 'Transactions'], ['contracts', 'Contracts'], ['prov', 'Medical Providers'], ['insurance', 'Insurance'], ['docs', 'Documents'], ['map', 'Provider Map'], ['messages', `Messages${p.messages?.length ? ` (${p.messages.length})` : ''}`]] as [Tab, string][]).map(([k, l]) => (
+        {([['overview', 'Overview'], ['trans', 'Transactions'], ['contracts', 'Contracts'], ['prov', 'Treating Providers'], ['insurance', 'Insurance'], ['docs', 'Documents'], ['map', 'Provider Map'], ['messages', `Messages${p.messages?.length ? ` (${p.messages.length})` : ''}`],
+          ...(isAdmin ? [['fin', 'Financials']] : [])] as [Tab, string][]).map(([k, l]) => (
           <div key={k} className={'tab' + (tab === k ? ' active' : '')} onClick={() => setTab(k)}>{l}</div>
         ))}
       </div>
@@ -134,10 +135,11 @@ export function PatientScreen({ id }: { id: string }) {
       {tab === 'trans' && <Transactions p={p} mut={mut} setModal={setModal} md={md} attach={attach} isAdmin={isAdmin} ins={ins} />}
       {tab === 'contracts' && <Contracts p={p} mut={mut} insurer={insurer} md={md} loadIns={loadIns} />}
       {tab === 'prov' && <Providers p={p} mut={mut} setModal={setModal} md={md} go={go} boot={boot} />}
-      {tab === 'insurance' && <InsuranceTab p={p} insurer={insurer} adj={adj} go={go} />}
+      {tab === 'insurance' && <InsuranceTab p={p} insurer={insurer} adj={adj} go={go} mut={mut} />}
       {tab === 'docs' && <Docs p={p} mut={mut} />}
       {tab === 'map' && <MapTab p={p} mut={mut} boot={boot} go={go} />}
       {tab === 'messages' && <MessagesTab p={p} mut={mut} />}
+      {tab === 'fin' && isAdmin && <FinancialsTab p={p} />}
 
       <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={onFile} />
       {modal}
@@ -198,18 +200,18 @@ function Overview({ p, mut, setModal, insurer, adj, md, isAdmin, today, go }: an
             {p.carrierConfirmed
               ? <span className="badge b-green">✓ coverage verified</span>
               : <span className="badge b-red" style={{ cursor: 'pointer' }} title="Click when coverage is confirmed with the carrier"
-                  onClick={() => confirm('Mark coverage as VERIFIED with the carrier?') && mut(() => api('PATCH', '/patients/' + p.id, { carrierConfirmed: 1 }))}>⚠ unverified — click when confirmed</span>}</dd>
+                  onClick={() => confirm('Mark coverage as VERIFIED with the carrier?') && mut(() => api('PATCH', '/patients/' + p.id, { carrierConfirmed: 1 }))}>unverified — click when confirmed</span>}</dd>
           <dt>Consent</dt><dd>{p.consentSharing
             ? <span className="badge b-green">✓ Records-sharing consent signed</span>
-            : <span className="badge b-amber" title="Carrier portal cannot access bills/records until the patient agreement with the sharing clause is signed">🔒 Not on file — carrier docs locked</span>}</dd>
+            : <span className="badge b-amber" title="Carrier portal cannot access bills/records until the patient agreement with the sharing clause is signed">Not on file — carrier docs locked</span>}</dd>
           <dt>Ins. agent</dt><dd>{p.agentName ? <>{p.agentName}{p.agentContact ? ' · ' + p.agentContact : ''} {p.agentAuth ? <span className="badge b-green">auth ✓</span> : <span className="badge b-amber">no auth</span>}</> : '—'}</dd>
           <dt>Referral source</dt><dd>{p.referralSource || '—'}</dd>
-          {p.appointments?.length > 0 && <><dt>Next appt</dt><dd><span className="badge b-blue">📅 {p.appointments[0].whenAt}</span> <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--muted)' }}>{p.appointments[0].note || ''}</span></dd></>}
+          {p.appointments?.length > 0 && <><dt>Next appt</dt><dd><span className="badge b-blue">{p.appointments[0].whenAt}</span> <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--muted)' }}>{p.appointments[0].note || ''}</span></dd></>}
           <dt>Claim #</dt><dd>{p.claimNumber || '—'}</dd>
           <dt>Policy #</dt><dd>{p.policyNumber || '—'}</dd>
           <dt>Adjuster</dt><dd>{adj ? `${adj.name} · ${adj.phone || ''} · ${adj.email || ''}` : '—'}</dd>
           <dt>Attorney</dt><dd>{p.attorneyRetained
-            ? <span className="badge b-red">⚠ Retained{p.attorneyFirm ? ': ' + p.attorneyFirm : ''}{p.attorneyDate ? ' · ' + fmtDate(p.attorneyDate) : ''}</span>
+            ? <span className="badge b-red">Retained{p.attorneyFirm ? ': ' + p.attorneyFirm : ''}{p.attorneyDate ? ' · ' + fmtDate(p.attorneyDate) : ''}</span>
             : <span className="badge b-green">None (thesis metric ✓)</span>}</dd>
           <dt>Accident</dt><dd style={{ fontWeight: 400 }}>{p.accident || '—'}</dd>
         </dl>
@@ -249,11 +251,11 @@ function Overview({ p, mut, setModal, insurer, adj, md, isAdmin, today, go }: an
                   <div className="due">Due <b>{fmtDate(t.due)}</b>{od ? ' — overdue' : ''}</div>
                   <div className="made">Created {t.created} by {t.by}</div>
                   <span className="cmtlink" onClick={() => setOpenCmts(s => ({ ...s, [t.id]: !s[t.id] }))}>
-                    💬 {t.comments.length} comment{t.comments.length === 1 ? '' : 's'}</span>{' '}
+                    {t.comments.length} comment{t.comments.length === 1 ? '' : 's'}</span>{' '}
                   <span className="cmtlink" style={{ color: 'var(--amber)' }} onClick={() => {
                     const due = prompt('Push this task out to (YYYY-MM-DD):', t.due || todayISO());
                     if (due) mut(() => api('POST', `/tasks/${t.id}/snooze`, { due }));
-                  }}>⏩ Push out</span>
+                  }}>Push out</span>
                 </div>
               </div>
               {openCmts[t.id] && (
@@ -299,7 +301,7 @@ function Overview({ p, mut, setModal, insurer, adj, md, isAdmin, today, go }: an
         <button className="btn sm" style={{ marginTop: 10 }} onClick={editUW}>✎ Edit underwriting</button>
       </Widget>
 
-      <Widget wkey="provs" title="Medical providers" defSize="s">
+      <Widget wkey="provs" title="Treating providers" defSize="s">
         {p.provLinks.map((l: any) => {
           const pr = md(l.providerId); if (!pr) return null;
           return (
@@ -360,7 +362,6 @@ function Overview({ p, mut, setModal, insurer, adj, md, isAdmin, today, go }: an
 
 /* ================= transactions ================= */
 function Transactions({ p, mut, setModal, md, attach, isAdmin, ins }: any) {
-  const [finOpen, setFinOpen] = useState(false);
   const fourCheck = (b: any) => {
     const fc = ins?.checks?.[b.id];
     if (!fc) return null;
@@ -380,11 +381,6 @@ function Transactions({ p, mut, setModal, md, attach, isAdmin, ins }: any) {
         { key: 'note', label: 'Adjustment note', full: true, value: b.eobNote || '' },
       ]}
       onSave={async v => { await mut(() => api('POST', `/bills/${b.id}/eob`, v)); setModal(null); }} />);
-  const live = (x: any) => !x.voided;
-  const received = p.receipts.filter(live).reduce((s: number, r: any) => s + (r.status === 'Cleared' ? r.amount : 0), 0);
-  const pendingIn = p.receipts.filter(live).reduce((s: number, r: any) => s + (r.status !== 'Cleared' ? r.amount : 0), 0);
-  const paid = p.bills.filter(live).reduce((s: number, b: any) => s + (b.status === 'paid' ? b.rate : 0), 0);
-  const net = received - paid;
 
   const voidBill = (b: any) => {
     const reason = prompt(`Void this ${md(b.providerId)?.name} bill (DOS ${fmtDate(b.dos)}, ${fmt$(b.billed)})?\n\nEnter the reason (required — goes in the permanent record):`);
@@ -394,30 +390,13 @@ function Transactions({ p, mut, setModal, md, attach, isAdmin, ins }: any) {
     const reason = prompt(`Void this receipt (${fmt$(r.amount)})?\n\nEnter the reason (required):`);
     if (reason?.trim()) mut(() => api('POST', `/receipts/${r.id}/void`, { reason }));
   };
-  const setPayout = (b: any) => {
-    const v = prompt(`Payout to ${md(b.providerId)?.name} for DOS ${fmtDate(b.dos)} (billed ${fmt$(b.billed)}):`, String(b.rate || ''));
-    if (v === null) return;
-    const rate = parseFloat(v);
-    if (rate >= 0) mut(() => api('PATCH', `/bills/${b.id}`, { rate }));
-  };
   const reconcile = (r: any) => setModal(
     <ReconcileModal p={p} receipt={r} md={md} onClose={() => setModal(null)}
       onSave={async (billIds: string[]) => { await mut(() => api('POST', `/receipts/${r.id}/link`, { billIds })); setModal(null); }} />);
 
   const addBill = () => {
-    if (!p.provLinks.length) { alert('Link a provider first (Medical Providers tab or map).'); return; }
-    setModal(
-      <FormModal title="Add bill (one date of service)" onClose={() => setModal(null)} saveLabel="Add bill"
-        fields={[
-          { key: 'providerId', label: 'Provider (search)', type: 'search', options: p.provLinks.map((l: any) => ({ v: l.providerId, l: md(l.providerId)?.name || l.providerId })) },
-          { key: 'dos', label: 'Date of service', type: 'date', value: todayISO() },
-          { key: 'billed', label: 'Billed amount ($)', type: 'number' },
-          { key: 'rate', label: 'Payout ($) — leave blank to auto-calculate from the branch rate', type: 'number' },
-        ]}
-        onSave={async v => {
-          if (!v.providerId) { alert('No provider match'); return; }
-          await mut(() => api('POST', `/patients/${p.id}/bills`, v)); setModal(null);
-        }} />);
+    if (!p.provLinks.length) { alert('Link a provider first (Treating Providers tab or map).'); return; }
+    setModal(<BillModal p={p} md={md} mut={mut} onClose={() => setModal(null)} />);
   };
   const addReceipt = () => setModal(
     <FormModal title="Record insurance receipt" onClose={() => setModal(null)} saveLabel="Record"
@@ -430,50 +409,54 @@ function Transactions({ p, mut, setModal, md, attach, isAdmin, ins }: any) {
       onSave={async v => { await mut(() => api('POST', `/patients/${p.id}/receipts`, v)); setModal(null); }} />);
   const pay = (b: any) => {
     const pr = md(b.providerId);
-    if (confirm(`Send payment of ${fmt$(b.rate)} to ${pr?.name} for DOS ${fmtDate(b.dos)}? (v1: logs the payment; ACH integration at deployment)`))
+    if (confirm(`Release payment to ${pr?.name} for DOS ${fmtDate(b.dos)} (bill of ${fmt$(b.billed)})?\n\nPays at the contracted rate. (v1: logs the payment; payment rails arrive with the clearinghouse integration.)`))
       mut(() => api('POST', `/bills/${b.id}/pay`));
+  };
+  // Carrier-paid state: any linked receipt cleared → paid; linked but pending → pending.
+  const carrierPaid = (b: any) => {
+    const recs = (b.coveredBy || []).map((rid: number) => p.receipts.find((r: any) => r.id === rid)).filter(Boolean);
+    if (recs.some((r: any) => r.status === 'Cleared' && !r.voided)) return <span className="badge b-green">✓ Carrier paid</span>;
+    if (recs.length) return <span className="badge b-amber">Receipt pending</span>;
+    return <span className="badge b-gray">Not yet</span>;
   };
 
   return (
     <div className="card">
       <div className="chead"><h3>Bills, notes & payments</h3>
-        <div><button className="btn sm" onClick={() => window.open(`/api/patients/${p.id}/batch-packet`)}>📦 Batch bill packet</button>{' '}
-          <button className="btn sm" onClick={addBill}>＋ Add bill</button>{' '}
+        <div><button className="btn sm" onClick={() => window.open(`/api/patients/${p.id}/batch-packet`)}>Batch bill packet</button>{' '}
+          <button className="btn sm primary" onClick={addBill}>＋ Add bill / invoice</button>{' '}
           <button className="btn sm" onClick={addReceipt}>↓ Record insurance receipt</button></div>
       </div>
       <div className="cbody">
         <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>
-          One entry per date of service. A bill can't be paid until its visit note is attached.</div>
+          One entry per date of service. A bill can’t be paid until its visit note is attached. Payouts are calculated automatically from contracted terms.</div>
         <table><tbody>
-          <tr><th>Provider · DOS</th><th>Billed</th><th>Payout</th><th>4-check</th><th>Bill</th><th>Visit note</th><th>Covered by</th><th>Status</th><th></th></tr>
+          <tr><th>Provider · DOS</th><th>Billed</th><th>4-check</th><th>Bill</th><th>Visit note</th><th>Carrier → us</th><th>Us → provider</th><th></th></tr>
           {p.bills.map((b: any) => b.voided ? (
             <tr key={b.id} style={{ opacity: 0.45 }}>
               <td><s><b>{md(b.providerId)?.name || '?'}</b></s><br /><span style={{ color: 'var(--muted)' }}>DOS {fmtDate(b.dos)}</span></td>
-              <td><s>{fmt$(b.billed)}</s></td><td><s>{fmt$(b.rate)}</s></td>
-              <td colSpan={4}><span className="badge b-red">VOIDED</span> <span style={{ fontSize: 12 }}>{b.voidReason}</span></td>
-              <td colSpan={2} />
+              <td><s>{fmt$(b.billed)}</s></td>
+              <td colSpan={5}><span className="badge b-red">VOIDED</span> <span style={{ fontSize: 12 }}>{b.voidReason}</span></td>
+              <td />
             </tr>
           ) : (
             <tr key={b.id}>
-              <td><b>{md(b.providerId)?.name || '?'}</b><br /><span style={{ color: 'var(--muted)' }}>DOS {fmtDate(b.dos)}</span></td>
+              <td><b>{md(b.providerId)?.name || '?'}</b><br /><span style={{ color: 'var(--muted)' }}>DOS {fmtDate(b.dos)}{b.descr ? ` · ${b.descr}` : ''}</span></td>
               <td>{fmt$(b.billed)}</td>
-              <td>{b.rate > 0
-                ? <span className={b.status === 'paid' ? '' : 'link'} onClick={() => b.status !== 'paid' && setPayout(b)}>{fmt$(b.rate)}</span>
-                : <span className="addpdf" onClick={() => setPayout(b)}>set payout</span>}</td>
               <td>{fourCheck(b) || <span style={{ color: 'var(--muted)' }}>—</span>}</td>
               <td>{b.hasBill
-                ? <span className="pdf" title={b.billFileName || ''} onClick={() => b.billFileId ? window.open('/api/files/' + b.billFileId) : alert('Demo record — no stored file')}>🧾 Bill</span>
+                ? <span className="pdf" title={b.billFileName || ''} onClick={() => b.billFileId ? window.open('/api/files/' + b.billFileId) : alert('Demo record — no stored file')}>Bill</span>
                 : <span className="addpdf" onClick={() => attach(b.id, 'bill')}>＋ attach bill</span>}</td>
               <td>{b.hasNote
-                ? <span className="pdf" title={b.noteFileName || ''} onClick={() => b.noteFileId ? window.open('/api/files/' + b.noteFileId) : alert('Demo record — no stored file')}>📋 Note</span>
+                ? <span className="pdf" title={b.noteFileName || ''} onClick={() => b.noteFileId ? window.open('/api/files/' + b.noteFileId) : alert('Demo record — no stored file')}>Note</span>
                 : <span className="addpdf" onClick={() => attach(b.id, 'note')}>＋ attach note</span>}</td>
-              <td>{b.coveredBy?.length ? <span className="badge b-green">✓ receipt</span> : <span className="badge b-gray">—</span>}</td>
-              <td>{b.status === 'paid' ? <span className="badge b-green">Paid {b.paidDate}</span>
+              <td>{carrierPaid(b)}</td>
+              <td>{b.status === 'paid' ? <span className="badge b-green">✓ Paid in full {b.paidDate}</span>
                 : (b.hasBill && b.hasNote ? <span className="badge b-blue">Ready to pay</span>
                   : <span className="badge b-amber">Blocked — missing {b.hasBill ? 'note' : 'bill'}</span>)}</td>
               <td style={{ whiteSpace: 'nowrap' }}>
                 {b.status === 'paid' ? <button className="btn sm" disabled>Paid ✓</button>
-                  : <button className="btn sm primary" disabled={!(b.hasBill && b.hasNote)} title={!(b.hasBill && b.hasNote) ? 'Attach bill + visit note first' : ''} onClick={() => pay(b)}>Pay</button>}{' '}
+                  : <button className="btn sm primary" disabled={!(b.hasBill && b.hasNote)} title={!(b.hasBill && b.hasNote) ? 'Attach bill + visit note first' : 'Releases payment at the contracted rate'} onClick={() => pay(b)}>Pay</button>}{' '}
                 <button className="btn sm" title="Void (correction — permanent record kept)" onClick={() => voidBill(b)}>Void</button>{' '}
                 {b.denied
                   ? <button className="btn sm" style={{ color: 'var(--amber)' }} title={b.denialReason || ''} onClick={() => {
@@ -488,7 +471,7 @@ function Transactions({ p, mut, setModal, md, attach, isAdmin, ins }: any) {
                   {b.eobAt ? `EOB ✓` : 'EOB'}</button>}
               </td>
             </tr>))}
-          {!p.bills.length && <tr><td colSpan={9} style={{ color: 'var(--muted)' }}>No bills yet.</td></tr>}
+          {!p.bills.length && <tr><td colSpan={8} style={{ color: 'var(--muted)' }}>No bills yet.</td></tr>}
         </tbody></table>
 
         <div style={{ margin: '16px 0 6px', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: 'var(--muted)', fontWeight: 700 }}>Insurance receipts</div>
@@ -511,19 +494,167 @@ function Transactions({ p, mut, setModal, md, attach, isAdmin, ins }: any) {
             </tr>))}
           {!p.receipts.length && <tr><td colSpan={6} style={{ color: 'var(--muted)' }}>No receipts yet.</td></tr>}
         </tbody></table>
+        {isAdmin && <div style={{ fontSize: 11.5, color: 'var(--ink-mute)', marginTop: 12 }}>Case margins and payout detail moved to the admin-only <b>Financials</b> tab.</div>}
+      </div>
+    </div>
+  );
+}
 
-        {isAdmin && (
-          <div style={{ marginTop: 16 }}>
-            <span className="fin-toggle" onClick={() => setFinOpen(f => !f)}>🔒 Internal financials (admin only) ▾</span>
-            {finOpen && (
-              <div style={{ marginTop: 10 }} className="statrow">
-                <div className="stat"><div className="sv money-in">{fmt$(received)}</div><div className="sl">Received (cleared)</div></div>
-                <div className="stat"><div className="sv" style={{ color: 'var(--amber)' }}>{fmt$(pendingIn)}</div><div className="sl">Receipts pending</div></div>
-                <div className="stat"><div className="sv money-out">{fmt$(paid)}</div><div className="sl">Paid to providers</div></div>
-                <div className="stat"><div className="sv">{fmt$(net)}</div><div className="sl">Net / margin</div></div>
-                <div className="stat"><div className="sv">{received ? Math.round((net / received) * 100) + '%' : '—'}</div><div className="sl">Margin %</div></div>
-              </div>)}
+/* ================= add bill / invoice (files inline, payout auto) ================= */
+function BillModal({ p, md, mut, onClose }: any) {
+  const [mode, setMode] = useState<'itemized' | 'invoice'>('itemized');
+  const [providerId, setProviderId] = useState(p.provLinks[0]?.providerId || '');
+  const [dos, setDos] = useState(todayISO());
+  const [billed, setBilled] = useState('');
+  const [descr, setDescr] = useState('');
+  const [items, setItems] = useState([{ cpt: '', units: '1', charge: '' }]);
+  const [busy, setBusy] = useState(false);
+  const billRef = useRef<HTMLInputElement>(null);
+  const noteRef = useRef<HTMLInputElement>(null);
+  const [billName, setBillName] = useState('');
+  const [noteName, setNoteName] = useState('');
+
+  const lineSum = items.reduce((s, x) => s + (parseFloat(x.charge) || 0) * (parseFloat(x.units) || 1), 0);
+  const billedNum = parseFloat(billed) || 0;
+  const mismatch = mode === 'itemized' && billedNum > 0 && Math.abs(lineSum - billedNum) > 0.01;
+  const setItem = (i: number, k: string, v: string) => setItems(xs => xs.map((x, j) => j === i ? { ...x, [k]: v } : x));
+
+  const save = async () => {
+    const billFile = billRef.current?.files?.[0];
+    const noteFile = noteRef.current?.files?.[0];
+    if (!providerId) return alert('Pick the provider');
+    if (!billFile) return alert('Attach the bill document — it’s required');
+    if (mode === 'invoice' && !descr.trim()) return alert('General invoices need a description');
+    if (mode === 'itemized' && mismatch) return alert(`CPT lines total ${fmt$(lineSum)} but the billed amount is ${fmt$(billedNum)} — they must match exactly`);
+    const fd = new FormData();
+    fd.append('bill', billFile);
+    if (noteFile) fd.append('note', noteFile);
+    fd.append('providerId', providerId); fd.append('dos', dos); fd.append('billed', billed);
+    fd.append('mode', mode); fd.append('descr', descr);
+    fd.append('items', JSON.stringify(items.filter(x => x.cpt.trim()).map(x => ({ cpt: x.cpt.trim(), units: parseFloat(x.units) || 1, charge: parseFloat(x.charge) || 0 }))));
+    setBusy(true);
+    try {
+      await mut(async () => {
+        const res = await fetch(`/api/patients/${p.id}/bills2`, { method: 'POST', body: fd, credentials: 'same-origin' });
+        const data = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(data?.error || res.statusText);
+        return data;
+      });
+      onClose();
+    } catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
+
+  const inp = { border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', fontSize: 13, width: '100%' } as const;
+  return (
+    <div className="overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal" style={{ maxWidth: 640 }}>
+        <h2>Add bill — one date of service</h2>
+        <div className="subtabs" style={{ marginBottom: 12 }}>
+          <span className={'subtab' + (mode === 'itemized' ? ' active' : '')} onClick={() => setMode('itemized')}>Itemized bill (CPT lines)</span>
+          <span className={'subtab' + (mode === 'invoice' ? ' active' : '')} onClick={() => setMode('invoice')}>General invoice</span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 10 }}>
+          <div><label style={{ fontSize: 11.5, color: 'var(--ink-mute)' }}>Provider*</label>
+            <select style={inp} value={providerId} onChange={e => setProviderId(e.target.value)}>
+              {p.provLinks.map((l: any) => <option key={l.providerId} value={l.providerId}>{md(l.providerId)?.name || l.providerId}</option>)}
+            </select></div>
+          <div><label style={{ fontSize: 11.5, color: 'var(--ink-mute)' }}>Date of service*</label>
+            <input style={inp} type="date" value={dos} onChange={e => setDos(e.target.value)} /></div>
+          <div><label style={{ fontSize: 11.5, color: 'var(--ink-mute)' }}>Billed amount ($)*</label>
+            <input style={inp} type="number" value={billed} onChange={e => setBilled(e.target.value)} /></div>
+        </div>
+        {mode === 'itemized' ? (
+          <div style={{ marginBottom: 10 }}>
+            <label style={{ fontSize: 11.5, color: 'var(--ink-mute)' }}>CPT lines* — must total the billed amount</label>
+            {items.map((x, i) => (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 80px 110px 30px', gap: 6, marginTop: 6 }}>
+                <input style={inp} placeholder="CPT (e.g. 98941)" value={x.cpt} onChange={e => setItem(i, 'cpt', e.target.value)} />
+                <input style={inp} type="number" placeholder="Units" value={x.units} onChange={e => setItem(i, 'units', e.target.value)} />
+                <input style={inp} type="number" placeholder="Charge $" value={x.charge} onChange={e => setItem(i, 'charge', e.target.value)} />
+                <button className="btn sm" onClick={() => setItems(xs => xs.length > 1 ? xs.filter((_, j) => j !== i) : xs)}>✕</button>
+              </div>))}
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 8 }}>
+              <button className="btn sm" onClick={() => setItems(xs => [...xs, { cpt: '', units: '1', charge: '' }])}>＋ Add line</button>
+              <span className="mono" style={{ fontSize: 12.5, color: mismatch ? 'var(--red)' : 'var(--green-dark)' }}>
+                Lines total {fmt$(lineSum)}{billedNum > 0 ? ` of ${fmt$(billedNum)}` : ''}{mismatch ? ' — must match' : lineSum > 0 && !mismatch && billedNum > 0 ? ' ✓' : ''}</span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ marginBottom: 10 }}>
+            <label style={{ fontSize: 11.5, color: 'var(--ink-mute)' }}>Description*</label>
+            <input style={inp} placeholder="e.g. MRI lumbar spine — outside imaging invoice" value={descr} onChange={e => setDescr(e.target.value)} />
           </div>)}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 4 }}>
+          <div><label style={{ fontSize: 11.5, color: 'var(--ink-mute)' }}>Bill document* (PDF/image)</label>
+            <input ref={billRef} type="file" style={{ fontSize: 12 }} onChange={e => setBillName(e.target.files?.[0]?.name || '')} />
+            {billName && <div style={{ fontSize: 11, color: 'var(--green-dark)' }}>✓ {billName}</div>}</div>
+          <div><label style={{ fontSize: 11.5, color: 'var(--ink-mute)' }}>Visit note (unlocks payment)</label>
+            <input ref={noteRef} type="file" style={{ fontSize: 12 }} onChange={e => setNoteName(e.target.files?.[0]?.name || '')} />
+            {noteName && <div style={{ fontSize: 11, color: 'var(--green-dark)' }}>✓ {noteName}</div>}</div>
+        </div>
+        <div style={{ fontSize: 11.5, color: 'var(--ink-mute)', margin: '8px 0 4px' }}>
+          Payout is calculated automatically from contracted terms — nothing to enter.{' '}
+          <button className="btn sm" disabled title="Bill OCR auto-fill arrives with the document-reading integration">Read from upload (soon)</button>
+        </div>
+        <div className="mactions">
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Add bill'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ================= financials — admin-only margins tab ================= */
+function FinancialsTab({ p }: any) {
+  const [fin, setFin] = useState<any>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => { api('GET', `/patients/${p.id}/financials`).then(setFin).catch(e => setErr(e.message)); }, [p.id]);
+  if (err) return <div className="card"><div className="cbody">{err}</div></div>;
+  if (!fin) return null;
+  const c = fin.case;
+  const money = (n: number | null | undefined) => n == null ? '—' : fmt$(n);
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="chead"><h3>Case economics — admin only</h3>
+          <span style={{ fontSize: 11.5, color: 'var(--ink-mute)' }}>Payout figures live only on this tab. Everywhere else shows bills as paid in full.</span></div>
+        <div className="cbody">
+          <div className="statrow">
+            <div className="stat"><div className="sv">{money(c.billedTotal)}</div><div className="sl">Total billed</div></div>
+            <div className="stat"><div className="sv money-in">{money(c.received)}</div><div className="sl">Carrier paid us (cleared)</div></div>
+            <div className="stat"><div className="sv" style={{ color: 'var(--amber)' }}>{money(c.pendingIn)}</div><div className="sl">Receipts pending</div></div>
+            <div className="stat"><div className="sv money-out">{money(c.payoutPaid)}</div><div className="sl">Paid to providers (actual)</div></div>
+            <div className="stat"><div className="sv">{money(c.marginRealized)}{c.marginRealizedPct != null ? ` (${c.marginRealizedPct}%)` : ''}</div><div className="sl">Margin realized (cash)</div></div>
+            <div className="stat"><div className="sv">{money(c.marginProjected)}{c.marginProjectedPct != null ? ` (${c.marginProjectedPct}%)` : ''}</div><div className="sl">Margin projected (contracted)</div></div>
+            <div className="stat"><div className="sv">{c.carrierPctOfBilled != null ? c.carrierPctOfBilled + '%' : '—'}</div><div className="sl">Carrier pays (% of billed)</div></div>
+          </div>
+        </div>
+      </div>
+      <div className="card">
+        <div className="chead"><h3>Per-provider margins{fin.zip ? ` · Medicare benchmarked at ZIP ${fin.zip}` : ' · no ZIP on the patient address — Medicare comparison unavailable'}</h3></div>
+        <div className="cbody" style={{ overflowX: 'auto' }}>
+          <table><tbody>
+            <tr><th>Provider</th><th>Bills</th><th>Billed</th><th>We pay (contracted)</th><th>% of billed</th><th>Medicare total</th><th>× Medicare</th><th>Carrier pays</th><th>% of billed</th><th>Margin (proj.)</th></tr>
+            {fin.providers.map((x: any) => (
+              <tr key={x.providerId}>
+                <td><b>{x.name}</b><div style={{ fontSize: 11, color: 'var(--ink-mute)' }}>{x.type || ''} · {x.medicareCoverage}</div></td>
+                <td className="mono">{x.bills}</td>
+                <td className="mono">{money(x.billedTotal)}</td>
+                <td className="mono money-out">{money(x.payoutTotal)}</td>
+                <td className="mono">{x.payoutPctOfBilled != null ? x.payoutPctOfBilled + '%' : '—'}</td>
+                <td className="mono">{money(x.medicareTotal)}</td>
+                <td className="mono">{x.medicareMultiple != null ? x.medicareMultiple + '×' : '—'}</td>
+                <td className="mono money-in">{money(x.revenueTotal || null)}</td>
+                <td className="mono">{x.carrierPctOfBilled != null ? x.carrierPctOfBilled + '%' : '—'}</td>
+                <td className="mono">{money(x.marginProjected)}</td>
+              </tr>))}
+            {!fin.providers.length && <tr><td colSpan={10} style={{ color: 'var(--muted)' }}>No bills yet.</td></tr>}
+          </tbody></table>
+          <div style={{ fontSize: 11.5, color: 'var(--ink-mute)', marginTop: 10, lineHeight: 1.6 }}>
+            <b>× Medicare</b> = contracted payout ÷ the Medicare-allowed total for the same CPT lines at this patient’s ZIP (from the fee tool’s live CMS data). Lines without CPT codes or outside the loaded code list aren’t benchmarked. <b>Margin projected</b> uses contracted carrier revenue where on file, billed otherwise.
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -619,11 +750,17 @@ function Contracts({ p, mut, insurer, md, loadIns }: any) {
   const send = async () => {
     const methods = [byEmail && 'Email', byText && 'Text'].filter(Boolean).join(' + ');
     if (!methods) { alert('Pick at least one send method'); return; }
-    const toLabel = recips[toIdx]?.l.split(' — ')[0] || '—';
-    await mut(() => api('POST', `/patients/${p.id}/sentdocs`, {
-      name: tpl, method: methods,
-      to: toLabel + (extra.trim() ? ` +${extra.split(',').length} more` : ''),
-    }));
+    const label = recips[toIdx]?.l || '—';
+    const toLabel = label.split(' — ')[0];
+    const email = (label.match(/[\w.+-]+@[\w.-]+\.\w+/) || [''])[0];
+    try {
+      const r = await api('POST', `/patients/${p.id}/sentdocs`, {
+        name: tpl, method: methods, email,
+        to: toLabel + (extra.trim() ? ` +${extra.split(',').length} more` : ''),
+      });
+      await mut(async () => r);
+      openDocFlow(r._doc);   // generated document + prewritten email draft
+    } catch (e: any) { alert(e.message || 'Error'); }
     setExtra('');
   };
 
@@ -665,11 +802,11 @@ function Contracts({ p, mut, insurer, md, loadIns }: any) {
           <div className="mfield" style={{ marginBottom: 12 }}><label>Send by</label>
             <div style={{ display: 'flex', gap: 16, padding: '4px 0' }}>
               <label style={{ fontWeight: 600, fontSize: 13 }}><input type="checkbox" checked={byEmail} onChange={e => setByEmail(e.target.checked)} /> ✉ Email</label>
-              <label style={{ fontWeight: 600, fontSize: 13 }}><input type="checkbox" checked={byText} onChange={e => setByText(e.target.checked)} /> 💬 Text (SMS)</label>
+              <label style={{ fontWeight: 600, fontSize: 13 }}><input type="checkbox" checked={byText} onChange={e => setByText(e.target.checked)} /> Text (SMS)</label>
             </div></div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn primary" onClick={send}>Send</button>
-            <button className="btn" onClick={() => alert("Preview: template auto-filled with this patient's details (rendering ships with the e-sign integration).")}>👁 Preview filled doc</button>
+            <button className="btn" onClick={() => alert("Preview: template auto-filled with this patient's details (rendering ships with the e-sign integration).")}>Preview filled doc</button>
           </div>
           <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>
             Sends are logged & tracked. Live e-sign + email/SMS delivery are wired at deployment.</div>
@@ -737,7 +874,7 @@ function OneTimeAgreements({ p, mut, loadIns }: any) {
   );
 }
 
-/* ================= medical providers ================= */
+/* ================= treating providers ================= */
 function OptimizerPanel({ p }: any) {
   const [rank, setRank] = useState<any[] | null>(null);
   const [type, setType] = useState('');
@@ -748,7 +885,7 @@ function OptimizerPanel({ p }: any) {
   if (!rank) return null;
   return (
     <div className="card" style={{ marginBottom: 16 }}>
-      <div className="chead"><h3>⚡ Provider optimizer — lowest contracted cost that still treats well</h3>
+      <div className="chead"><h3>Provider optimizer — lowest contracted cost that still treats well</h3>
         <select value={type} onChange={e => setType(e.target.value)} style={{ fontSize: 12 }}>
           {types.map(t => <option key={t} value={t}>{t || 'All specialties'}</option>)}
         </select></div>
@@ -767,14 +904,24 @@ function OptimizerPanel({ p }: any) {
             </tr>))}
         </tbody></table>
         <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
-          Ranking = preferred status + conservative-care philosophy + contracted cost + proximity + credentialing. Doctors decide care; we decide who's in the network.</div>
+          Ranking = preferred status + conservative-care philosophy + contracted cost + proximity + credentialing. Doctors decide care; we decide who’s in the network. The same ranking drives the pins on the Provider Map.</div>
       </div>
     </div>
   );
 }
 
+/* Opens the generated document + the prewritten email draft (Outlook or default mail app).
+   The attachment rides along automatically once the email integration is live — until
+   then it’s one drag from the downloaded document into the draft. */
+function openDocFlow(doc: any) {
+  if (!doc) return;
+  window.open(doc.url, '_blank');
+  setTimeout(() => { window.location.href = doc.mailto; }, 600);
+}
+
 function Providers({ p, mut, setModal, md, go, boot }: any) {
   const [dd, setDd] = useState<number | null>(null);
+  const [showFormer, setShowFormer] = useState(false);
 
   const linkProvider = () => {
     const avail = boot.providers.filter((pr: any) => !p.provLinks.some((l: any) => l.providerId === pr.id));
@@ -799,48 +946,74 @@ function Providers({ p, mut, setModal, md, go, boot }: any) {
       amount = parseFloat(v);
       if (!amount) return;
     }
-    await mut(() => api('POST', `/provlinks/${l.id}/action`, { kind, amount }));
+    try {
+      const r = await api('POST', `/provlinks/${l.id}/action`, { kind, amount });
+      await mut(async () => r);
+      openDocFlow(r._doc);
+    } catch (e: any) { alert(e.message || 'Error'); }
+  };
+  const editAuth = async (l: any) => {
+    const pr = md(l.providerId);
+    const v = prompt(`Corrected authorization TOTAL for ${pr?.name} (currently ${fmt$(l.authAmount)}):`, String(l.authAmount || 0));
+    if (v === null) return;
+    const amt = parseFloat(v);
+    if (!(amt >= 0)) return alert('Enter a valid amount');
+    await mut(() => api('PATCH', `/provlinks/${l.id}`, { authAmount: amt }));
+  };
+
+  const active = p.provLinks.filter((l: any) => l.status === 'pending' || l.status === 'authorized');
+  const former = p.provLinks.filter((l: any) => l.status === 'canceled' || l.status === 'finalized');
+  const row = (l: any, i: number) => {
+    const pr = md(l.providerId); if (!pr) return null;
+    const oneTime = !pr.underContract;
+    return (
+      <tr key={l.id}>
+        <td><span className="link" onClick={() => go({ screen: 'provider', id: pr.id })}>{pr.name}</span><br />
+          <span className="idchip">{pr.id}</span> <span className={'badge ' + (oneTime ? 'b-gray' : 'b-green')}>{oneTime ? 'One-time' : 'Contracted'}</span></td>
+        <td>{l.branch || '—'}</td><td>{pr.type}</td>
+        <td><b>{fmt$(l.authAmount)}</b> <span style={{ color: 'var(--muted)', fontSize: 11 }}>({l.authCount} auth{l.authCount === 1 ? '' : 's'})</span>{' '}
+          <span className="addpdf" title="Correct the authorized total (audited)" onClick={() => editAuth(l)}>edit</span></td>
+        <td><b>{fmt$(l.billed)}</b>{l.billed > l.authAmount && l.authAmount > 0 && <span style={{ color: 'var(--red)', fontSize: 11, fontWeight: 700 }}> over auth</span>}</td>
+        <td><span className={'badge ' + statusBadge(l.status)}>{cap(l.status)}</span></td>
+        <td>
+          <div className="dd">
+            <button className="btn sm" onClick={() => setDd(dd === i ? null : i)}>Send… ▾</button>
+            {dd === i && (
+              <div className="ddmenu">
+                <div className="ddi" onClick={() => action(l, 'auth')}><b>Send authorization</b><small>Creates the auth document + opens the email draft — sets Authorized</small></div>
+                <div className="ddi" onClick={() => action(l, 'reqform')}><b>Send add’l auth request form</b><small>Blank form for the provider to fill & send back</small></div>
+                <div className="ddi" onClick={() => action(l, 'addauth')}><b>Send add’l authorization</b><small>Grant additional $ — adds to the auth total</small></div>
+                <div className={'ddi' + (l.status === 'canceled' || l.status === 'finalized' ? ' dis' : '')} onClick={() => action(l, 'cxl')}><b>Send cancel-auth form</b><small>Verifies all transactions; provider must sign — sets Canceled</small></div>
+                <div className={'ddi' + (l.status !== 'canceled' ? ' dis' : '')} onClick={() => action(l, 'cxlback')}><b>Mark cxl form returned (signed)</b><small>Finalizes the provider on this case</small></div>
+              </div>)}
+          </div>
+        </td>
+      </tr>);
   };
 
   return (
     <div>
     <OptimizerPanel p={p} />
     <div className="card">
-      <div className="chead"><h3>Treating providers</h3>
+      <div className="chead"><h3>Treating providers — actively on this case</h3>
         <button className="btn sm primary" onClick={linkProvider}>＋ Add provider (or pick from map)</button></div>
       <div className="cbody">
         <table><tbody>
-          <tr><th>Provider</th><th>Branch</th><th>Type</th><th>Auth amount</th><th>Amount billed</th><th>Status</th><th></th></tr>
-          {p.provLinks.map((l: any, i: number) => {
-            const pr = md(l.providerId); if (!pr) return null;
-            const oneTime = pr.status.includes('Single case agreement');
-            return (
-              <tr key={l.id}>
-                <td><span className="link" onClick={() => go({ screen: 'provider', id: pr.id })}>{pr.name}</span><br />
-                  <span className="idchip">{pr.id}</span> <span className={'badge ' + (oneTime ? 'b-gray' : 'b-green')}>{oneTime ? 'One-time' : 'Contracted'}</span></td>
-                <td>{l.branch || '—'}</td><td>{pr.type}</td>
-                <td><b>{fmt$(l.authAmount)}</b> <span style={{ color: 'var(--muted)', fontSize: 11 }}>({l.authCount} auth{l.authCount === 1 ? '' : 's'})</span></td>
-                <td><b>{fmt$(l.billed)}</b>{l.billed > l.authAmount && l.authAmount > 0 && <span style={{ color: 'var(--red)', fontSize: 11, fontWeight: 700 }}> over auth</span>}</td>
-                <td><span className={'badge ' + statusBadge(l.status)}>{cap(l.status)}</span></td>
-                <td>
-                  <div className="dd">
-                    <button className="btn sm" onClick={() => setDd(dd === i ? null : i)}>Send… ▾</button>
-                    {dd === i && (
-                      <div className="ddmenu">
-                        <div className="ddi" onClick={() => action(l, 'auth')}><b>Send authorization</b><small>Authorize treatment $ — sets status to Authorized</small></div>
-                        <div className="ddi" onClick={() => action(l, 'reqform')}><b>Send add'l auth request form</b><small>Blank form for the provider to fill & send back</small></div>
-                        <div className="ddi" onClick={() => action(l, 'addauth')}><b>Send add'l authorization</b><small>Grant additional $ — adds to auth amount</small></div>
-                        <div className={'ddi' + (l.status === 'canceled' || l.status === 'finalized' ? ' dis' : '')} onClick={() => action(l, 'cxl')}><b>Send cancel-auth form</b><small>Verifies all transactions; provider must sign — sets Canceled</small></div>
-                        <div className={'ddi' + (l.status !== 'canceled' ? ' dis' : '')} onClick={() => action(l, 'cxlback')}><b>Mark cxl form returned (signed)</b><small>Finalizes the provider on this case</small></div>
-                      </div>)}
-                  </div>
-                </td>
-              </tr>);
-          })}
-          {!p.provLinks.length && <tr><td colSpan={7} style={{ color: 'var(--muted)' }}>No providers linked yet.</td></tr>}
+          <tr><th>Provider</th><th>Branch</th><th>Type</th><th>Auth total</th><th>Amount billed</th><th>Status</th><th></th></tr>
+          {active.map(row)}
+          {!active.length && <tr><td colSpan={7} style={{ color: 'var(--muted)' }}>No providers actively treating — add one above or from the map.</td></tr>}
         </tbody></table>
         <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 10 }}>
-          Status flow: <b>Pending</b> (before auth) → <b>Authorized</b> → <b>Canceled</b> (cxl form sent) → <b>Finalized</b> (signed cxl form returned). Updates automatically with each send.</div>
+          Every send generates the actual document and opens a prewritten email — drag the downloaded doc into the draft (attaches automatically once the email integration is live).
+          Status flow: <b>Pending</b> → <b>Authorized</b> → <b>Canceled</b> → <b>Finalized</b>.</div>
+        {former.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <span className="fin-toggle" onClick={() => setShowFormer(f => !f)}>No longer treating ({former.length}) ▾</span>
+            {showFormer && <table style={{ marginTop: 8 }}><tbody>
+              <tr><th>Provider</th><th>Branch</th><th>Type</th><th>Auth total</th><th>Amount billed</th><th>Status</th><th></th></tr>
+              {former.map(row)}
+            </tbody></table>}
+          </div>)}
       </div>
     </div>
     </div>
@@ -848,10 +1021,37 @@ function Providers({ p, mut, setModal, md, go, boot }: any) {
 }
 
 /* ================= insurance tab ================= */
-function InsuranceTab({ p, insurer, adj, go }: any) {
+function InsuranceTab({ p, insurer, adj, go, mut }: any) {
   if (!insurer) return <div className="card"><div className="cbody" style={{ color: 'var(--muted)' }}>No insurance company linked. Edit the profile to add one.</div></div>;
+  const authedOut = p.provLinks.reduce((s: number, l: any) => s + (l.authAmount || 0), 0);
+  const carrierAuth = p.carrierAuthorized || 0;
+  const remaining = carrierAuth - authedOut;
+  const editCarrierAuth = async () => {
+    const v = prompt(`Carrier-authorized amount for this case (what ${insurer.name} has approved us to spend):`, String(carrierAuth || ''));
+    if (v === null) return;
+    const amt = parseFloat(v);
+    if (!(amt >= 0)) return alert('Enter a valid amount');
+    await mut(() => api('PATCH', `/patients/${p.id}`, { carrierAuthorized: amt }));
+  };
   return (
     <div className="grid2">
+      <div className="card" style={{ gridColumn: '1/-1' }}>
+        <div className="chead"><h3>Carrier authorization envelope</h3>
+          <button className="btn sm" onClick={editCarrierAuth}>Edit carrier-authorized amount</button></div>
+        <div className="cbody">
+          <div className="statrow">
+            <div className="stat"><div className="sv">{carrierAuth ? fmt$(carrierAuth) : '—'}</div><div className="sl">Carrier has authorized</div></div>
+            <div className="stat"><div className="sv">{fmt$(authedOut)}</div><div className="sl">Authorized out to providers</div></div>
+            <div className="stat"><div className={'sv' + (carrierAuth && remaining < 0 ? ' bad' : '')} style={carrierAuth && remaining < 0 ? { color: 'var(--red)' } : undefined}>{carrierAuth ? fmt$(remaining) : '—'}</div><div className="sl">Remaining to authorize</div></div>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--ink-mute)', marginTop: 8 }}>
+            {carrierAuth
+              ? remaining < 0
+                ? 'Provider authorizations exceed what the carrier has approved — get the carrier authorization raised before sending more.'
+                : 'You can send provider authorizations up to the remaining amount without going back to the carrier.'
+              : 'No carrier authorization recorded yet — set it when the adjuster confirms what’s approved for this case.'}</div>
+        </div>
+      </div>
       <div className="card">
         <div className="chead"><h3>{insurer.name} — case info</h3>
           <button className="btn sm" onClick={() => go({ screen: 'insurance', id: insurer.id })}>Open full profile →</button></div>
@@ -868,15 +1068,15 @@ function InsuranceTab({ p, insurer, adj, go }: any) {
       <div className="card">
         <div className="chead"><h3>Business rules</h3></div>
         <div className="cbody" style={{ fontSize: 13, lineHeight: 1.8 }}>
-          {insurer.rules.map((r: string, i: number) => <div key={i}>• {r}</div>)}
+          {insurer.rules.map((r: string, i: number) => <div key={i}>· {r}</div>)}
           {!insurer.rules.length && '—'}</div>
       </div>
       <div className="card" style={{ gridColumn: '1/-1' }}>
         <div className="chead"><h3>Contracts with {insurer.name}</h3></div>
         <div className="cbody">
           {insurer.contracts.map((c: any) => (
-            <div key={c.id} className="doc"><div className="dic">📄</div>
-              <div style={{ flex: 1 }}><b>{c.name}</b><div className="dmeta">{c.meta}</div></div>
+            <div key={c.id} className="doc"><div className="dic">▤</div>
+              <div style={{ flex: 1 }}><b>{c.name}</b><div className="dmeta">{c.scope === 'adjuster' ? 'Adjuster contract · ' : 'Carrier master · '}{c.meta}</div></div>
               <span className={'badge ' + (c.status === 'Active' ? 'b-green' : 'b-amber')}>{c.status === 'Active' ? '✓ Active' : c.status}</span></div>))}
           {!insurer.contracts.length && <div style={{ color: 'var(--muted)' }}>No contracts on file.</div>}
         </div>
@@ -886,46 +1086,139 @@ function InsuranceTab({ p, insurer, adj, go }: any) {
 }
 
 /* ================= documents ================= */
+const DOC_CATS = ['All', 'Other', 'Contract', 'Insurance', 'Medical', 'Billing'];
 function Docs({ p, mut }: any) {
   const fileRef = useRef<HTMLInputElement>(null);
-  const [cat, setCat] = useState('Misc');
+  const [cat, setCat] = useState('Other');
+  const [filter, setFilter] = useState('All');
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (!f) return;
     await mut(() => apiUpload(`/patients/${p.id}/documents`, f, { cat }));
     if (fileRef.current) fileRef.current.value = '';
   };
+  const shown = p.documents.filter((d: any) => filter === 'All' || d.cat === filter);
   return (
     <div className="card">
       <div className="chead"><h3>Documents</h3>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <select value={cat} onChange={e => setCat(e.target.value)}
+          <select value={cat} onChange={e => setCat(e.target.value)} title="Category for the next upload"
             style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '6px 8px', fontSize: 12 }}>
-            {['Misc', 'Contract', 'Insurance', 'Medical', 'Billing'].map(c => <option key={c}>{c}</option>)}
+            {DOC_CATS.slice(1).map(c => <option key={c}>{c}</option>)}
           </select>
           <button className="btn sm primary" onClick={() => fileRef.current?.click()}>＋ Upload</button>
           <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={onFile} />
         </div></div>
       <div className="cbody">
-        {p.documents.map((d: any) => (
+        <div className="mapfilters" style={{ marginBottom: 12 }}>
+          <span style={{ fontWeight: 700, padding: '6px 4px 0 0', color: 'var(--muted)', fontSize: 12 }}>FILTER:</span>
+          {DOC_CATS.map(c => {
+            const n = c === 'All' ? p.documents.length : p.documents.filter((d: any) => d.cat === c).length;
+            return <span key={c} className={'chipf' + (filter === c ? ' on' : '')} onClick={() => setFilter(c)}>{c}{n ? ` (${n})` : ''}</span>;
+          })}
+        </div>
+        {shown.map((d: any) => (
           <div key={d.id} className="doc">
-            <div className="dic">{d.name.endsWith('.zip') ? '🖼' : '📄'}</div>
+            <div className="dic">▤</div>
             <div style={{ flex: 1 }}><b>{d.name}</b><div className="dmeta">{d.cat} · {d.meta}</div></div>
             <button className="btn sm" onClick={() => d.fileId ? window.open('/api/files/' + d.fileId) : alert('Demo record — no stored file')}>View</button>
           </div>))}
-        {!p.documents.length && <div style={{ color: 'var(--muted)' }}>No documents yet.</div>}
+        {!shown.length && <div style={{ color: 'var(--muted)' }}>{p.documents.length ? 'Nothing in this category.' : 'No documents yet.'}</div>}
       </div>
     </div>
   );
 }
 
-/* ================= map ================= */
+/* ================= provider map — pins, distance, drive time ================= */
+declare const L: any;
+function haversineMi(a: { lat: number; lon: number }, b: { lat: number; lon: number }) {
+  const R = 3958.8, dLat = (b.lat - a.lat) * Math.PI / 180, dLon = (b.lon - a.lon) * Math.PI / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
 function MapTab({ p, mut, boot, go }: any) {
   const [filter, setFilter] = useState('All');
-  const [mapQ, setMapQ] = useState(p.address || 'Portland, OR');
-  const types = ['All', 'Chiropractic', 'Imaging / MRI', 'PT / Rehab', 'Orthopedic', 'Preferred only ★'];
-  let provs = boot.providers;
-  if (filter === 'Preferred only ★') provs = provs.filter((x: any) => x.status.includes('Preferred'));
-  else if (filter !== 'All') provs = provs.filter((x: any) => x.type === filter);
+  const [pins, setPins] = useState<any[]>([]);          // {provider, branch, lat, lon}
+  const [ptLoc, setPtLoc] = useState<any>(null);
+  const [sel, setSel] = useState<any>(null);            // selected pin + drive info
+  const [status, setStatus] = useState('Loading map…');
+  const [rank, setRank] = useState<any[]>([]);
+  const mapRef = useRef<any>(null);
+  const layerRef = useRef<any>(null);
+  const divRef = useRef<HTMLDivElement>(null);
+  const types = ['All', 'Chiropractic', 'Imaging / MRI', 'PT / Rehab', 'Orthopedic', 'Preferred only'];
+
+  useEffect(() => { api('GET', `/optimizer?patientId=${p.id}`).then(setRank).catch(() => {}); }, [p.id]);
+
+  // geocode patient + provider branches (server-side cache keeps this cheap)
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        let home: any = null;
+        if (p.address) {
+          try { home = await api('GET', '/geo/code?q=' + encodeURIComponent(p.address)); } catch { /* no patient pin */ }
+        }
+        if (!dead) setPtLoc(home);
+        const out: any[] = [];
+        for (const pr of boot.providers) {
+          for (const b of pr.branches) {
+            if (!b.address) continue;
+            try {
+              const g = await api('GET', '/geo/code?q=' + encodeURIComponent(b.address));
+              out.push({ provider: pr, branch: b, lat: g.lat, lon: g.lon });
+            } catch { /* skip unresolvable */ }
+          }
+        }
+        if (!dead) { setPins(out); setStatus(out.length ? '' : 'No provider addresses could be located.'); }
+      } catch { if (!dead) setStatus('Map data unavailable — geocoding service unreachable.'); }
+    })();
+    return () => { dead = true; };
+  }, [p.id, boot.providers]);
+
+  const shownPins = pins.filter(x =>
+    filter === 'All' ? true : filter === 'Preferred only' ? x.provider.status.includes('Preferred') : x.provider.type === filter);
+
+  // build / update the Leaflet map
+  useEffect(() => {
+    if (typeof L === 'undefined' || !divRef.current) return;
+    if (!mapRef.current) {
+      mapRef.current = L.map(divRef.current).setView([ptLoc?.lat || 32.78, ptLoc?.lon || -96.8], 10);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' }).addTo(mapRef.current);
+      layerRef.current = L.layerGroup().addTo(mapRef.current);
+    }
+    const layer = layerRef.current;
+    layer.clearLayers();
+    const bounds: any[] = [];
+    if (ptLoc) {
+      L.circleMarker([ptLoc.lat, ptLoc.lon], { radius: 9, color: '#2D3647', fillColor: '#F5A623', fillOpacity: 1, weight: 2 })
+        .bindTooltip(`${p.name} (patient)`).addTo(layer);
+      bounds.push([ptLoc.lat, ptLoc.lon]);
+    }
+    for (const x of shownPins) {
+      const linked = p.provLinks.some((l: any) => l.providerId === x.provider.id);
+      const m = L.circleMarker([x.lat, x.lon], {
+        radius: 8, weight: 2, color: '#2D3647',
+        fillColor: linked ? '#45A8EB' : x.provider.status.includes('Preferred') ? '#5E9E44' : '#8B93A3', fillOpacity: 0.95,
+      }).bindTooltip(`${x.provider.name} — ${x.branch.name}`).addTo(layer);
+      m.on('click', async () => {
+        const dist = ptLoc ? haversineMi(ptLoc, x) : null;
+        const r = rank.find((z: any) => z.id === x.provider.id);
+        setSel({ ...x, linked, dist, score: r?.score, reasons: r?.reasons || [], drive: null });
+        if (ptLoc) {
+          try {
+            const rt = await api('GET', `/geo/route?flat=${ptLoc.lat}&flon=${ptLoc.lon}&tlat=${x.lat}&tlon=${x.lon}`);
+            setSel((s: any) => s && s.provider.id === x.provider.id && s.branch.name === x.branch.name
+              ? { ...s, drive: { min: Math.round(rt.seconds / 60), mi: Math.round(rt.meters / 1609 * 10) / 10 } } : s);
+          } catch { setSel((s: any) => s ? { ...s, drive: 'unavailable' } : s); }
+        }
+      });
+      bounds.push([x.lat, x.lon]);
+    }
+    if (bounds.length) mapRef.current.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
+  }, [shownPins.length, ptLoc, filter, rank, p.provLinks.length]);
+
+  useEffect(() => () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } }, []);
 
   return (
     <div>
@@ -935,30 +1228,33 @@ function MapTab({ p, mut, boot, go }: any) {
       </div>
       <div className="maplayout">
         <div className="card">
-          <div className="chead"><h3>Providers{filter !== 'All' ? ' — ' + filter : ''}</h3></div>
-          <div className="cbody" style={{ maxHeight: 420, overflowY: 'auto' }}>
-            {provs.map((pr: any) => {
-              const linked = p.provLinks.some((l: any) => l.providerId === pr.id);
-              const b = pr.branches[0] || {};
-              return (
-                <div key={pr.id} className="provitem">
-                  <b className="link" onClick={() => go({ screen: 'provider', id: pr.id })}>{pr.name}</b>{' '}
-                  {pr.status.includes('Preferred') && <span className="badge b-green">★</span>}
-                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{pr.type} · {b.name || ''}<br />{b.address || ''}</div>
-                  {linked ? <span className="badge b-blue" style={{ marginTop: 6 }}>✓ Linked</span>
-                    : <button className="btn sm primary" style={{ marginTop: 6 }}
-                      onClick={() => mut(() => api('POST', `/patients/${p.id}/provlinks`, { providerId: pr.id, branch: b.name || null }))}>🔗 Link to patient</button>}
-                  {' '}<button className="btn sm" style={{ marginTop: 6 }} onClick={() => setMapQ(b.address || pr.name)}>📍 Show on map</button>
-                </div>);
-            })}
-            {!provs.length && <div style={{ color: 'var(--muted)' }}>No providers match this filter.</div>}
+          <div className="chead"><h3>{sel ? 'Selected provider' : 'Click a pin'}</h3></div>
+          <div className="cbody" style={{ maxHeight: 460, overflowY: 'auto' }}>
+            {sel ? (
+              <div>
+                <b className="link" style={{ fontSize: 15 }} onClick={() => go({ screen: 'provider', id: sel.provider.id })}>{sel.provider.name}</b>
+                {sel.provider.status.includes('Preferred') && <span className="badge b-green" style={{ marginLeft: 6 }}>★ Preferred</span>}
+                <div style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 10px' }}>{sel.provider.type} · {sel.branch.name}<br />{sel.branch.address}</div>
+                <div className="statrow">
+                  <div className="stat"><div className="sv">{sel.dist != null ? sel.dist.toFixed(1) + ' mi' : '—'}</div><div className="sl">From patient (straight line)</div></div>
+                  <div className="stat"><div className="sv">{sel.drive === 'unavailable' ? '—' : sel.drive ? `${sel.drive.min} min` : ptLoc ? '…' : '—'}</div><div className="sl">Drive time{sel.drive && sel.drive !== 'unavailable' ? ` (${sel.drive.mi} mi)` : ''}</div></div>
+                  <div className="stat"><div className="sv">{sel.score ?? '—'}</div><div className="sl">Optimizer score</div></div>
+                </div>
+                {sel.reasons.length > 0 && <div style={{ fontSize: 12, color: 'var(--ink-soft)', margin: '8px 0' }}>{sel.reasons.join(' · ')}</div>}
+                {sel.linked
+                  ? <span className="badge b-blue">✓ Already on this case</span>
+                  : <button className="btn sm primary" onClick={() => mut(() => api('POST', `/patients/${p.id}/provlinks`, { providerId: sel.provider.id, branch: sel.branch.name || null }))}>＋ Link to patient</button>}
+              </div>
+            ) : (
+              <div style={{ fontSize: 12.5, color: 'var(--ink-soft)', lineHeight: 1.7 }}>
+                {status || <>The patient is the marigold dot. <span style={{ color: '#45A8EB', fontWeight: 700 }}>Blue</span> pins are already on this case, <span style={{ color: 'var(--green-dark)', fontWeight: 700 }}>green</span> pins are preferred network, grey are the rest. Click any pin for distance, drive time, and the optimizer’s take.</>}
+              </div>)}
+            <div style={{ marginTop: 14, fontSize: 11, color: 'var(--ink-mute)' }}>
+              Maps © OpenStreetMap · drive times via OSRM. The optimizer list view lives on the Treating Providers tab.</div>
           </div>
         </div>
         <div>
-          <iframe className="mapiframe" title="map" loading="lazy"
-            src={`https://www.google.com/maps?q=${encodeURIComponent(mapQ)}&z=13&output=embed`} />
-          <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
-            Live Google Maps centered on the patient's address. "Show on map" jumps to a provider. Pin layer + distance sort ship with the Maps API key at deployment.</div>
+          <div ref={divRef} className="mapiframe" style={{ minHeight: 460 }} />
         </div>
       </div>
     </div>

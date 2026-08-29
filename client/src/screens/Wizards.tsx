@@ -297,8 +297,8 @@ export function ProviderWizard({ onClose, onDone }: { onClose: () => void; onDon
           <p className="wsub">On finish: profile created, rates active, four-check armed. E-signature of the agreement goes out at deployment; until then, attach the signed PDF on the branch.</p>
           <div className="card" style={{ boxShadow: 'none' }}><div className="cbody" style={{ fontSize: 13.5, lineHeight: 2 }}>
             <b>{v.name || '—'}</b> · {v.type} · {v.status}<br />
-            Branch: {v.bName || '—'} {v.ratePct ? `· auto-payout ${v.ratePct}%${v.rateCap ? ` (cap $${v.rateCap})` : ''}` : '· ⚠ no numeric rate — payouts will be manual'}<br />
-            Credentialing: NPI {v.npi || '⚠ missing'} · license {v.licenseNo ? `on file, exp ${v.licenseExp || '?'}` : '⚠ missing'}<br />
+            Branch: {v.bName || '—'} {v.ratePct ? `· auto-payout ${v.ratePct}%${v.rateCap ? ` (cap $${v.rateCap})` : ''}` : '· no numeric rate — payouts will be manual'}<br />
+            Credentialing: NPI {v.npi || 'missing'} · license {v.licenseNo ? `on file, exp ${v.licenseExp || '?'}` : 'missing'}<br />
             CPT rates: {v.cptRates?.trim() ? v.cptRates.trim().split('\n').length + ' lines' : 'none (percentage fallback)'}
           </div></div>
         </div>)}

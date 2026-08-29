@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useApp } from '../App';
 import { FormModal, RatesCard } from '../ui';
@@ -9,7 +9,7 @@ const stBadge = (s: string) => (s === 'Preferred' ? 'b-green' : s === 'Under con
 
 export function ProviderScreen({ id }: { id: string }) {
   const { boot, go, refresh } = useApp();
-  const [tab, setTab] = useState<'corp' | 'branch'>('corp');
+  const [tab, setTab] = useState<'corp' | 'branch' | 'contracts' | 'admin'>('corp');
   const [stats, setStats] = useState<any[]>([]);
   const [modal, setModal] = useState<React.ReactNode>(null);
   const pr = boot.providers.find(x => x.id === id) as Provider | undefined;
@@ -22,10 +22,11 @@ export function ProviderScreen({ id }: { id: string }) {
 
   const saveProvider = async (v: Record<string, string>) => {
     await api('PATCH', '/providers/' + pr.id, {
-      name: v.name, type: v.type, status: v.status.split(','), taxId: v.taxId,
+      name: v.name, type: v.type, status: v.status.split(',').filter(Boolean), taxId: v.taxId,
       corpAddress: v.corpAddress, corpPhone: v.corpPhone, corpEmail: v.corpEmail,
       rules: v.rules.split('\n').filter(x => x.trim()),
       conservative: Number(v.conservative) || 0,
+      orgType: v.orgType || 'corporate',
     });
     await refresh(); setModal(null);
   };
@@ -34,7 +35,8 @@ export function ProviderScreen({ id }: { id: string }) {
       fields={[
         { key: 'name', label: 'Name', value: pr.name },
         { key: 'type', label: 'Type', value: pr.type },
-        { key: 'status', label: 'Status', type: 'select', value: pr.status.join(','), options: [{ v: 'Preferred,Under contract', l: 'Preferred + under contract' }, { v: 'Under contract', l: 'Under contract' }, { v: 'Single case agreement', l: 'Single case agreement' }] },
+        { key: 'status', label: 'Status ("Under contract" is earned via signed BAA + rate agreement, not set here)', type: 'select', value: pr.status.filter(x => x !== 'Under contract').join(',') || 'Single case agreement', options: [{ v: 'Preferred', l: 'Preferred' }, { v: 'Single case agreement', l: 'Single case agreement' }, { v: '', l: '(no extra status)' }] },
+        { key: 'orgType', label: 'Organization structure', type: 'select', value: (pr as any).orgType || 'corporate', options: [{ v: 'corporate', l: 'Corporate office — all branches under one agreement' }, { v: 'independent', l: 'Independent office — its own single-office contract' }] },
         { key: 'taxId', label: 'Tax ID', value: pr.taxId },
         { key: 'conservative', label: 'Conservative-care philosophy (optimizer boost)', type: 'select', value: String((pr as any).conservative || 0), options: [{ v: '0', l: 'Not tagged' }, { v: '1', l: '✓ Conservative-care network' }] },
         { key: 'corpAddress', label: 'Corporate address', value: pr.corpAddress, full: true },
@@ -87,13 +89,17 @@ export function ProviderScreen({ id }: { id: string }) {
       </div>
 
       <div className="tabs">
-        <div className={'tab' + (tab === 'corp' ? ' active' : '')} onClick={() => setTab('corp')}>Corporate Office</div>
+        <div className={'tab' + (tab === 'corp' ? ' active' : '')} onClick={() => setTab('corp')}>{(pr as any).orgType === 'independent' ? 'Office' : 'Corporate Office'}</div>
         <div className={'tab' + (tab === 'branch' ? ' active' : '')} onClick={() => setTab('branch')}>Branches</div>
+        <div className={'tab' + (tab === 'contracts' ? ' active' : '')} onClick={() => setTab('contracts')}>Contracts</div>
+        {boot.user.role === 'admin' && <div className={'tab' + (tab === 'admin' ? ' active' : '')} onClick={() => setTab('admin')}>Admin</div>}
       </div>
 
-      {tab === 'corp' ? (
+      {tab === 'contracts' && <ProviderContracts pr={pr} refresh={refresh} />}
+      {tab === 'admin' && boot.user.role === 'admin' && <ProviderAdmin pr={pr} />}
+
+      {tab === 'corp' && (
         <div className="grid2">
-          {boot.user.role === 'admin' && <div style={{ gridColumn: '1/-1' }}><RatesCard kind="provider" id={pr.id} label={pr.name} /></div>}
           <div className="card">
             <div className="chead"><h3>Corporate office</h3></div>
             <div className="cbody"><dl className="kv">
@@ -113,8 +119,11 @@ export function ProviderScreen({ id }: { id: string }) {
             </div>
           </div>
         </div>
-      ) : (
+      )}
+      {tab === 'branch' && (
         <div className="grid2">
+          {(pr as any).orgType === 'independent' && <div className="card" style={{ gridColumn: '1/-1' }}><div className="cbody" style={{ fontSize: 12.5, color: 'var(--ink-soft)' }}>
+            This is an <b>independent office on its own contract</b> — it has no corporate umbrella. Offices that operate under a shared corporate agreement belong as branches of the corporate profile instead.</div></div>}
           {pr.branches.map(b => {
             const st = stats.find(s => s.branchId === b.id) || { pts: 0, billed: 0, paid: 0, authSent: 0, missNotes: '0%' };
             return (
@@ -134,7 +143,7 @@ export function ProviderScreen({ id }: { id: string }) {
                       {b.ratePct != null && <span className="badge b-green" style={{ marginLeft: 6 }}>auto-payout: {b.ratePct}%{b.rateCap ? ` · $${b.rateCap} cap` : ''}</span>}
                       {b.ratePct == null && <span className="badge b-amber" style={{ marginLeft: 6 }} title="Set Rate % in Edit to enable auto-payout on bills">no auto-payout</span>}</dd>
                     <dt>Contract</dt><dd>{b.contract
-                      ? <span className="pdf" onClick={() => alert('Opens the stored contract PDF (file storage per-branch ships with e-sign integration).')}>📄 {b.contract}</span>
+                      ? <span className="pdf" onClick={() => alert('Opens the stored contract PDF (file storage per-branch ships with e-sign integration).')}>{b.contract}</span>
                       : <span className="addpdf" onClick={() => attachContract(b)}>＋ attach signed contract</span>}</dd>
                   </dl>
                   <div style={{ marginTop: 12 }}>
@@ -160,4 +169,80 @@ export function ProviderScreen({ id }: { id: string }) {
       {modal}
     </div>
   );
+}
+/* ── contracts: the BAA + rate agreement gate ── */
+function ProviderContracts({ pr, refresh }: any) {
+  const baaRef = useRef<HTMLInputElement>(null);
+  const rateRef = useRef<HTMLInputElement>(null);
+  const upload = async (kind: 'baa' | 'rate', file?: File, signed?: boolean) => {
+    const fd = new FormData();
+    if (file) fd.append('file', file);
+    if (signed) fd.append('signed', '1');
+    const res = await fetch(`/api/providers/${pr.id}/contract/${kind}`, { method: 'POST', body: fd, credentials: 'same-origin' });
+    const d = await res.json().catch(() => null);
+    if (!res.ok) return alert(d?.error || res.statusText);
+    await refresh();
+  };
+  const doc = (kind: 'baa' | 'rate', label: string, fileId: string | null, signedAt: string | null, ref: any) => (
+    <div className="card">
+      <div className="chead"><h3>{label}</h3>
+        {signedAt ? <span className="badge b-green">Signed</span> : <span className="badge b-amber">Not signed</span>}</div>
+      <div className="cbody">
+        <dl className="kv" style={{ gridTemplateColumns: '110px 1fr' }}>
+          <dt>Signed</dt><dd>{signedAt || 'Not yet'}</dd>
+          <dt>Document</dt><dd>{fileId
+            ? <span className="pdf" onClick={() => window.open('/api/files/' + fileId)}>View stored copy</span>
+            : <span style={{ color: 'var(--muted)' }}>No copy stored</span>}</dd>
+        </dl>
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+          <button className="btn sm" onClick={() => ref.current?.click()}>Upload {fileId ? 'newer copy' : 'signed copy'}</button>
+          {!signedAt && <button className="btn sm primary" onClick={() => confirm(`Mark the ${label} as signed for ${pr.name}? (Audited.)`) && upload(kind, undefined, true)}>Mark signed</button>}
+          <input ref={ref} type="file" style={{ display: 'none' }}
+            onChange={e => { const f = e.target.files?.[0]; if (f) upload(kind, f, !signedAt && confirm('Also mark it signed now?')); }} />
+        </div>
+      </div>
+    </div>);
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="cbody" style={{ fontSize: 12.5, color: 'var(--ink-soft)' }}>
+          A provider is <b>Under contract</b> only when BOTH documents below are signed — the status flips automatically the moment the second one lands, and the four-check’s agreement gate keys off it. {(pr as any).orgType === 'independent' ? 'This independent office’s contract covers this office only.' : 'This corporate agreement covers every branch listed on this profile.'}
+        </div>
+      </div>
+      <div className="grid2">
+        {doc('baa', 'Business Associate Agreement (BAA)', (pr as any).baaFileId, (pr as any).baaSignedAt, baaRef)}
+        {doc('rate', 'Contracted rate agreement', (pr as any).rateAgreementFileId, (pr as any).rateAgreementSignedAt, rateRef)}
+      </div>
+    </div>);
+}
+
+/* ── admin: contracted rate + business terms (admin-only, stripped from staff payloads) ── */
+function ProviderAdmin({ pr }: any) {
+  const [info, setInfo] = useState<any>(null);
+  const load = () => api('GET', `/providers/${pr.id}/admin`).then(setInfo).catch(() => {});
+  useEffect(() => { load(); }, [pr.id]);
+  const setRate = async () => {
+    const v = prompt(`Contracted rate for ${pr.name} (e.g. "140% of Medicare" or "60% of billed, $280 cap"):`, info?.contractedRate || '');
+    if (v === null) return;
+    await api('POST', `/providers/${pr.id}/contracted-rate`, { rate: v });
+    load();
+  };
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="chead"><h3>Business terms — admin only</h3></div>
+        <div className="cbody">
+          <dl className="kv" style={{ gridTemplateColumns: '190px 1fr' }}>
+            <dt>Contracted rate</dt><dd>{info?.contractedRate || <span style={{ color: 'var(--muted)' }}>not recorded</span>}{' '}
+              <span className="addpdf" onClick={setRate}>edit</span></dd>
+            <dt>BAA</dt><dd>{info?.baaSignedAt || 'not signed'}</dd>
+            <dt>Rate agreement</dt><dd>{info?.rateAgreementSignedAt || 'not signed'}</dd>
+            <dt>Structure</dt><dd>{info?.orgType === 'independent' ? 'Independent office — own contract' : 'Corporate — one agreement covers all branches'}</dd>
+          </dl>
+          <div style={{ fontSize: 11.5, color: 'var(--ink-mute)', marginTop: 8 }}>
+            These terms never appear in non-admin payloads — coordinators and portals see billed amounts only.</div>
+        </div>
+      </div>
+      <RatesCard kind="provider" id={pr.id} label={pr.name} />
+    </div>);
 }

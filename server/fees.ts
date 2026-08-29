@@ -385,6 +385,18 @@ export function feeLookup(zip?: string, cpt?: string) {
   };
 }
 
+/** Current Medicare non-facility amount for one CPT at one ZIP (global modifier row).
+ *  Used by the per-case margins engine. Null when the ZIP or code isn't loaded. */
+export function medicareFor(zip: string, cpt: string): number | null {
+  const z = String(zip || '').replace(/\D/g, '').slice(0, 5);
+  if (!z) return null;
+  const loc = db.prepare('SELECT locality FROM fee_zips WHERE zip=? AND current=1 LIMIT 1').get(z) as any;
+  if (!loc) return null;
+  const r = db.prepare("SELECT nonfacAmount FROM fee_rates WHERE current=1 AND cpt=? AND modifier='' AND locality=? LIMIT 1")
+    .get(String(cpt).trim(), loc.locality) as any;
+  return r?.nonfacAmount ?? null;
+}
+
 /* ---------- router ---------- */
 export const fees = Router();
 // requireAuth is applied at mount; this router adds the fee-tool gate.

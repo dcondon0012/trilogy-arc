@@ -80,7 +80,7 @@ export function FeesPage({ user }: { user: User }) {
           <div style={{ flex: 1, minWidth: 200 }}>
             <label style={{ fontSize: 11.5, color: 'var(--ink-mute)', display: 'block', marginBottom: 3 }}>Filter codes</label>
             <input style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', width: '100%', fontSize: 13.5 }}
-              placeholder="🔍 CPT, description, or category…" value={q} onChange={e => setQ(e.target.value)} />
+              placeholder="⌕ CPT, description, or category…" value={q} onChange={e => setQ(e.target.value)} />
           </div>
           <label style={{ fontSize: 12.5, display: 'flex', gap: 6, alignItems: 'center', marginTop: 14 }}>
             <input type="checkbox" checked={facility} onChange={e => setFacility(e.target.checked)} /> Facility rates
@@ -95,7 +95,7 @@ export function FeesPage({ user }: { user: User }) {
               ? <span className="badge b-amber">ZIP {zip} not in the current Texas crosswalk — check the ZIP or refresh the data</span>
               : data.locality && (<>
                   <span className="badge b-blue">ZIP {zip} → {shown[0]?.localityName || 'locality ' + data.locality.code}</span>
-                  {data.locality.plus4 && <span className="badge b-amber" style={{ marginLeft: 6 }}>⚠ This ZIP splits localities by +4 extension — verify the full ZIP+4 for borderline addresses</span>}
+                  {data.locality.plus4 && <span className="badge b-amber" style={{ marginLeft: 6 }}>This ZIP splits localities by +4 extension — verify the full ZIP+4 for borderline addresses</span>}
                 </>)}
           </div>)}
       </div>
@@ -185,8 +185,8 @@ function FeeAdminPanel({ status, reload }: { status: any; reload: () => void }) 
   return (
     <div className="grid2" style={{ marginTop: 16 }}>
       <div className="card">
-        <div className="chead"><h3>Data pipeline 🔒 admin</h3>
-          <button className="btn sm primary" disabled={busy} onClick={refresh}>{busy ? '⏳ Refreshing from CMS…' : '↻ Refresh from CMS now'}</button>
+        <div className="chead"><h3>Data pipeline admin</h3>
+          <button className="btn sm primary" disabled={busy} onClick={refresh}>{busy ? 'Refreshing from CMS…' : '↻ Refresh from CMS now'}</button>
         </div>
         <div className="cbody">
           <div style={{ fontSize: 12.5, marginBottom: 8 }}>
@@ -214,7 +214,7 @@ function FeeAdminPanel({ status, reload }: { status: any; reload: () => void }) 
       </div>
 
       <div className="card">
-        <div className="chead"><h3>Codes of interest ({status.codes.filter((c: any) => c.active).length}) 🔒 admin</h3>
+        <div className="chead"><h3>Codes of interest ({status.codes.filter((c: any) => c.active).length}) admin</h3>
           <button className="btn sm" onClick={addCode}>＋ Add code</button></div>
         <div className="cbody" style={{ maxHeight: 420, overflowY: 'auto' }}>
           <table><tbody>

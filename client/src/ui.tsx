@@ -69,7 +69,7 @@ export function FormModal({ title, fields, onSave, onClose, saveLabel }: {
                 </select>
               ) : f.type === 'search' ? (
                 <>
-                  <input list={'dl_' + f.key} placeholder="🔍 Type to search…" value={vals[f.key]}
+                  <input list={'dl_' + f.key} placeholder="⌕ Type to search…" value={vals[f.key]}
                     onChange={e => set(f.key, e.target.value)} autoComplete="off" />
                   <datalist id={'dl_' + f.key}>
                     {f.options?.map(o => <option key={o.v} value={o.l} />)}
@@ -157,7 +157,7 @@ export function RatesCard({ kind, id, label }: { kind: 'carrier' | 'provider'; i
   };
   return (
     <div className="card">
-      <div className="chead"><h3>Contracted rates per CPT — {label} 🔒 admin</h3></div>
+      <div className="chead"><h3>Contracted rates per CPT — {label} admin</h3></div>
       <div className="cbody">
         <table><tbody>
           <tr><th>CPT</th><th>{kind === 'carrier' ? 'Carrier pays us' : 'We pay provider'}</th></tr>

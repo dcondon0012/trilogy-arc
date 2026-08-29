@@ -78,7 +78,7 @@ export function Home() {
     } catch (e: any) {
       if (e.status === 409 && e.data?.duplicates) {
         const list = e.data.duplicates.map((d: any) => `• ${d.name} (${d.id})${d.dob ? ' · DOB ' + fmtDate(d.dob) : ''}`).join('\n');
-        if (!confirm(`⚠ Possible duplicate patient:\n\n${list}\n\nCreate a new profile anyway?`)) return;
+        if (!confirm(`Possible duplicate patient:\n\n${list}\n\nCreate a new profile anyway?`)) return;
         p = await api('POST', '/patients', { ...v, force: true });
       } else throw e;
     }
@@ -139,7 +139,7 @@ export function Home() {
 
       {dash && (
         <div className="card" style={{ maxWidth: 980, margin: '0 auto 26px' }}>
-          <div className="chead"><h3>Operations dashboard 🔒 admin only — live</h3></div>
+          <div className="chead"><h3>Operations dashboard admin only — live</h3></div>
           <div className="cbody">
             <div className="statrow" style={{ marginBottom: 14 }}>
               <div className="stat"><div className="sv money-out">{fmtK(dash.payable)}</div><div className="sl">Owed to providers ({dash.payableCount})</div></div>
@@ -199,7 +199,7 @@ export function Home() {
                 </div>
               </div>);
           })}
-          {!tasks.length && <div style={{ color: 'var(--muted)', textAlign: 'center', padding: 12 }}>No open tasks 🎉</div>}
+          {!tasks.length && <div style={{ color: 'var(--muted)', textAlign: 'center', padding: 12 }}>No open tasks </div>}
         </div>
       </div>
 

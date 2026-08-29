@@ -662,6 +662,98 @@ async function main() {
   r = await call('GET', '/api/fees/lookup?zip=75201');
   assert(r.data.zipKnown === true && r.data.locality?.plus4 === true, 'fixed-width plus-4 flag parsed');
 
+  // ── 08/27 change set: auth docs, bill entry v2, financials, contracts, delete ──
+  r = await call('GET', '/api/patients/PT-10042');
+  assert(!r.data.documents.some((d: any) => d.cat === 'Misc'), 'document category Misc renamed to Other');
+  const l2007 = r.data.provLinks.find((l: any) => l.providerId === 'MD-2007');
+  // editable auth total
+  r = await call('PATCH', `/api/provlinks/${l2007.id}`, { authAmount: 3000 });
+  assert(r.status === 200 && r.data.provLinks.find((l: any) => l.id === l2007.id).authAmount === 3000, 'auth total editable after the fact');
+  // auth sends generate a document + prewritten email draft
+  r = await call('POST', `/api/provlinks/${l2007.id}/action`, { kind: 'reqform' });
+  assert(r.data._doc && r.data._doc.url.includes('/sentdoc/') && r.data._doc.mailto.startsWith('mailto:'), 'auth send returns document + email draft');
+  const printRes = await fetch(BASE + r.data._doc.url, { headers: { Cookie: cookies.join('; ') } });
+  const printHtml = await printRes.text();
+  assert(printRes.status === 200 && printHtml.includes('Sarah Mitchell') && printHtml.includes('Authorization'), 'printable auth document renders with case details');
+
+  // carrier authorization envelope
+  r = await call('PATCH', '/api/patients/PT-10042', { carrierAuthorized: 15000 });
+  assert(r.data.carrierAuthorized === 15000, 'carrier-authorized amount stored');
+
+  // bill entry v2: CPT lines must sum to billed; files ride inline; payout always auto
+  const mkForm = (fields: Record<string, string>, withNote = true) => {
+    const fd = new FormData();
+    fd.append('bill', new Blob(['%PDF-1.4 test bill'], { type: 'application/pdf' }), 'bill-v2.pdf');
+    if (withNote) fd.append('note', new Blob(['%PDF-1.4 test note'], { type: 'application/pdf' }), 'note-v2.pdf');
+    for (const [k, v] of Object.entries(fields)) fd.append(k, v);
+    return fd;
+  };
+  r = await call('POST', '/api/patients/PT-10042/bills2', undefined, mkForm({
+    providerId: 'MD-2007', dos: '2026-08-20', billed: '400', mode: 'itemized',
+    items: JSON.stringify([{ cpt: '98942', units: 1, charge: 250 }, { cpt: '97112', units: 1, charge: 100 }]),
+  }));
+  assert(r.status === 400 && /must match/.test(r.data.error), 'itemized bill rejected when CPT lines do not sum to billed');
+  r = await call('POST', '/api/patients/PT-10042/bills2', undefined, mkForm({
+    providerId: 'MD-2007', dos: '2026-08-20', billed: '350', mode: 'itemized',
+    items: JSON.stringify([{ cpt: '98942', units: 1, charge: 250 }, { cpt: '97112', units: 1, charge: 100 }]),
+  }));
+  const v2bill = r.data.bills.find((b: any) => b.dos === '2026-08-20' && b.billed === 350);
+  assert(r.status === 200 && v2bill && v2bill.hasBill === 1 && v2bill.hasNote === 1 && v2bill.items.length === 2, 'itemized bill v2: files inline, CPT lines stored');
+  assert(v2bill.rate === 210, 'payout auto-calculated on v2 bills (60% of $350)');
+  r = await call('POST', '/api/patients/PT-10042/bills2', undefined, mkForm({
+    providerId: 'MD-2007', dos: '2026-08-21', billed: '120', mode: 'invoice',
+  }, false));
+  assert(r.status === 400 && /description/.test(r.data.error), 'general invoice requires a description');
+  r = await call('POST', '/api/patients/PT-10042/bills2', undefined, mkForm({
+    providerId: 'MD-2007', dos: '2026-08-21', billed: '120', mode: 'invoice', descr: 'X-ray reading fee',
+  }, false));
+  assert(r.status === 200 && r.data.bills.some((b: any) => b.descr === 'X-ray reading fee'), 'general invoice mode works');
+
+  // per-case financials (admin-only margins)
+  r = await call('GET', '/api/patients/PT-10042/financials');
+  assert(r.status === 200 && r.data.case && typeof r.data.case.marginProjected === 'number'
+    && r.data.providers.some((x: any) => x.providerId === 'MD-2007' && x.payoutPctOfBilled != null), 'case financials computed for admin');
+
+  // insurer contracts: scope + admin-only rate
+  r = await call('POST', '/api/insurers/INS-3005/contracts', { name: 'Adjuster agreement — T. Ruiz (2026)', scope: 'adjuster', adjusterId: 'a1', rate: 85, status: 'Draft' });
+  assert(r.status === 200, 'adjuster-scope contract created');
+  assert(!JSON.stringify(r.data.contracts).includes('"rate"'), 'contract rate never in the general insurer payload');
+  r = await call('GET', '/api/insurers/INS-3005/contract-rates');
+  const adjC = r.data.find((x: any) => x.scope === 'adjuster' && x.adjusterId === 'a1');
+  assert(adjC && adjC.rate === 85, 'admin sees contract rates in the admin endpoint');
+  r = await call('PATCH', `/api/ins-contracts/${adjC.id}`, { status: 'Sent' });
+  assert(r.status === 200, 'contract status advances');
+
+  // provider BAA + rate agreement gate
+  r = await call('POST', '/api/providers', { name: 'Gate Test Clinic', type: 'Chiropractic' });
+  const gateId = r.data.id;
+  r = await call('GET', '/api/patients/PT-10042');   // fullProvider comes via bootstrap; use contract endpoint responses instead
+  let fdBaa = new FormData(); fdBaa.append('signed', '1');
+  r = await call('POST', `/api/providers/${gateId}/contract/baa`, undefined, fdBaa);
+  assert(r.status === 200 && r.data.underContract === false, 'BAA alone does not make a provider Under contract');
+  let fdRate = new FormData(); fdRate.append('signed', '1');
+  fdRate.append('file', new Blob(['%PDF rate agreement'], { type: 'application/pdf' }), 'rate-agreement.pdf');
+  r = await call('POST', `/api/providers/${gateId}/contract/rate`, undefined, fdRate);
+  assert(r.status === 200 && r.data.underContract === true && r.data.status.includes('Under contract'), 'BAA + rate agreement signed → Under contract (auto)');
+  r = await call('POST', '/api/providers/' + gateId + '/contracted-rate', { rate: '140% of Medicare' });
+  assert(r.status === 200, 'admin records contracted rate');
+  r = await call('GET', `/api/providers/${gateId}/admin`);
+  assert(r.data.contractedRate === '140% of Medicare', 'contracted rate readable in the provider admin endpoint');
+
+  // delete account (permanent sibling of deactivate)
+  r = await call('POST', '/api/admin/users', { name: 'Del Etee', email: 'del@trilogymed.com', role: 'coordinator', password: 'deletemepw1' });
+  const delId = r.data.id;
+  r = await call('DELETE', `/api/admin/users/${delId}`);
+  assert(r.status === 200, 'admin deletes an account');
+  {
+    const saved = cookies; cookies = [];
+    r = await call('POST', '/api/auth/login', { email: 'del@trilogymed.com', password: 'deletemepw1' });
+    assert(r.status === 401, 'deleted account cannot sign in');
+    cookies = saved;
+  }
+  r = await call('DELETE', `/api/admin/users/u1`);
+  assert(r.status === 400, 'cannot delete your own account');
+
   // ── security hardening ──
   // a temporary password is not a working API key: locked out until changed
   r = await call('POST', '/api/admin/users', { name: 'Tara Temp', email: 'tara@trilogymed.com', role: 'coordinator', password: 'temppass99' });
@@ -777,6 +869,17 @@ async function main() {
   assert(r.status === 403, 'coordinator blocked from fee tool without a grant');
   r = await call('GET', '/api/crm/workspace');
   assert(r.status === 403, 'coordinator blocked from CRM without a grant');
+  // payout secrecy: coordinators see bills as billed-and-paid, never payout or margin figures
+  r = await call('GET', '/api/patients/PT-10042');
+  assert(r.status === 200 && r.data.bills.length > 0 && r.data.bills.every((b: any) => !('rate' in b) && !('revenue' in b)), 'coordinator patient payload carries no payout/revenue figures');
+  r = await call('GET', '/api/rates/provider/MD-2007');
+  assert(r.status === 403, 'coordinator blocked from per-CPT payout rates');
+  r = await call('GET', '/api/patients/PT-10042/financials');
+  assert(r.status === 403, 'coordinator blocked from the case financials tab');
+  r = await call('PATCH', '/api/ins-contracts/1', { rate: 90 });
+  assert(r.status === 403, 'coordinator cannot set contract rates');
+  r = await call('PATCH', '/api/bills/b1', { rate: 1 });
+  assert(r.status === 403, 'coordinator cannot correct payouts');
 
   // admin grants the fee tool per-user → coordinator gets in
   cookies = [];

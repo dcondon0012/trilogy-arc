@@ -35,7 +35,7 @@ export function DirectoryScreen() {
     <div>
       <span className="backlink" onClick={() => go({ screen: 'home' })}>← Back</span>
       <div className="pt-head">
-        <div className="pt-id" style={{ background: 'var(--accent)' }}>📇</div>
+        <div className="pt-id" style={{ background: 'var(--accent)' }}>▤</div>
         <div className="pt-title" style={{ flex: 1 }}><h2>Directory</h2>
           <div className="pt-meta"><span className="badge b-blue">Every patient, provider, and carrier — filter and click through</span></div></div>
       </div>
@@ -48,7 +48,7 @@ export function DirectoryScreen() {
       {tab === 'pt' && (
         <div className="card">
           <div className="chead" style={{ gap: 8 }}>
-            <input placeholder="🔍 Name or ID…" value={q} onChange={e => setQ(e.target.value)} style={{ ...sel, width: 200 }} />
+            <input placeholder="⌕ Name or ID…" value={q} onChange={e => setQ(e.target.value)} style={{ ...sel, width: 200 }} />
             <select value={stage} onChange={e => setStage(e.target.value)} style={sel}>
               <option value="all">All stages</option>
               {STAGES.map((s, i) => <option key={s} value={String(i)}>{s}</option>)}

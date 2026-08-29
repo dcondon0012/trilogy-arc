@@ -33,20 +33,20 @@ export function InboxScreen() {
     <div>
       <span className="backlink" onClick={() => go({ screen: 'home' })}>← Back</span>
       <div className="pt-head">
-        <div className="pt-id" style={{ background: 'var(--amber)' }}>📥</div>
+        <div className="pt-id" style={{ background: 'var(--amber)' }}>⇩</div>
         <div className="pt-title" style={{ flex: 1 }}>
           <h2>Requests</h2>
           <div className="pt-meta"><span className="badge b-blue">Only two things live here: new-patient referrals awaiting intake review, and inbound email/fax that couldn't auto-match a patient. Everything else files straight to patient accounts.</span></div>
         </div>
         {boot.user.role === 'admin' && (<>
-          <button className="btn sm" onClick={() => simRef.current?.click()} title="Test the email/fax pipeline before the real webhooks are connected">⚗ Simulate inbound email/fax</button>
+          <button className="btn sm" onClick={() => simRef.current?.click()} title="Test the email/fax pipeline before the real webhooks are connected">Simulate inbound email/fax</button>
           <input ref={simRef} type="file" style={{ display: 'none' }} onChange={simulate} />
         </>)}
       </div>
 
       <div className="tabs">
         <div className={'tab' + (tab === 'triage' ? ' active' : '')} onClick={() => setTab('triage')}>
-          🆕 New patient requests ({items.filter(i => i.kind === 'referral' && i.status === 'triage').length})</div>
+          New patient requests ({items.filter(i => i.kind === 'referral' && i.status === 'triage').length})</div>
         <div className={'tab' + (tab === 'queued' ? ' active' : '')} onClick={() => setTab('queued')}>
           ✉ Unmatched email/fax ({items.filter(i => i.kind !== 'referral' && (i.status === 'triage' || i.status === 'queued')).length})</div>
         <div className={'tab' + (tab === 'done' ? ' active' : '')} onClick={() => setTab('done')}>Done</div>
@@ -60,7 +60,7 @@ export function InboxScreen() {
               <td style={{ whiteSpace: 'nowrap' }}>{i.receivedAt}</td>
               <td><span className={'badge ' + chBadge(i.channel)}>{i.channel}</span></td>
               <td>{i.fileId
-                ? <span className="pdf" onClick={() => window.open('/api/files/' + i.fileId)}>📄 {i.fileName}</span>
+                ? <span className="pdf" onClick={() => window.open('/api/files/' + i.fileId)}>{i.fileName}</span>
                 : i.fileName}<div style={{ fontSize: 11.5, color: 'var(--muted)' }}>{i.note}</div></td>
               <td style={{ fontSize: 12.5 }}>{i.fromInfo}</td>
               <td>{i.patientId ? <span className="link" onClick={() => go({ screen: 'patient', id: i.patientId! })}>{i.patientName}</span> : <span className="badge b-amber">unmatched</span>}</td>
@@ -112,7 +112,7 @@ function ProcessModal({ item, onClose }: { item: IntakeItem; onClose: () => void
         items: kind === 'bill' ? lines.filter(l => l.cpt || l.charge) : [],
         billed: kind === 'bill' ? billed : undefined,
       });
-      if (r.feeFlags?.length) alert('⚠ Fee schedule flags:\n' + r.feeFlags.join('\n'));
+      if (r.feeFlags?.length) alert('Fee schedule flags:\n' + r.feeFlags.join('\n'));
       onClose();
     } catch (e: any) { alert(e.message); } finally { setBusy(false); }
   };
@@ -125,11 +125,11 @@ function ProcessModal({ item, onClose }: { item: IntakeItem; onClose: () => void
     <div className="overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="modal" style={{ width: 760 }}>
         <h2>Process: {item.fileName} <span className={'badge ' + chBadge(item.channel)}>{item.channel}</span></h2>
-        {item.fileId && <div style={{ marginBottom: 10 }}><span className="pdf" onClick={() => window.open('/api/files/' + item.fileId)}>📄 Open document</span>
+        {item.fileId && <div style={{ marginBottom: 10 }}><span className="pdf" onClick={() => window.open('/api/files/' + item.fileId)}>Open document</span>
           <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 8 }}>from {item.fromInfo}</span></div>}
         <div className="mgrid">
           <div className="mfield"><label>Patient (search)</label>
-            <input placeholder="🔍 name or ID" value={patientQ || (boot.patients.find(p => p.id === patientId)?.name ?? '')}
+            <input placeholder="⌕ name or ID" value={patientQ || (boot.patients.find(p => p.id === patientId)?.name ?? '')}
               onChange={e => { setPatientQ(e.target.value); setPatientId(''); }} />
             {patientQ && !patientId && (
               <div style={{ border: '1px solid var(--line)', borderRadius: 8, marginTop: 4 }}>
@@ -153,7 +153,7 @@ function ProcessModal({ item, onClose }: { item: IntakeItem; onClose: () => void
         {kind === 'bill' && (<>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '14px 0 6px' }}>
             <b style={{ fontSize: 13 }}>CPT line items <span style={{ fontWeight: 400, color: 'var(--muted)' }}>(optional — total-only is OK)</span></b>
-            <button className="btn sm" onClick={parse}>🤖 Parse PDF (stub)</button>
+            <button className="btn sm" onClick={parse}>Parse PDF (stub)</button>
           </div>
           <table><tbody>
             <tr><th>CPT</th><th>ICD-10</th><th>Units</th><th>Charge $</th><th></th></tr>

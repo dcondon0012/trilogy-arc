@@ -69,7 +69,7 @@ export function Today() {
       </div>
 
       <div className="receipts">
-        <span className="zap">⚡</span> While you were away, the system logged <b>{deck.receipts.total} actions</b>
+        <span className="zap"></span> While you were away, the system logged <b>{deck.receipts.total} actions</b>
         {deck.receipts.items.length > 0 && <> — {deck.receipts.items.slice(0, 3).map((r: any) => `${r.what} ×${r.n}`).join(' · ')}</>}
         {' '}<span className="link" style={{ color: '#8FC7EF' }} onClick={() => setReceiptsOpen(v => !v)}>{receiptsOpen ? 'hide' : 'see the log →'}</span>
         {receiptsOpen && (
@@ -88,7 +88,7 @@ export function Today() {
 
       {cards.length === 0 ? (
         <div className="card" style={{ padding: 28, textAlign: 'center' }}>
-          <div className="serif" style={{ fontSize: 22, marginBottom: 6 }}>Deck clear. 🎉</div>
+          <div className="serif" style={{ fontSize: 22, marginBottom: 6 }}>Deck clear. </div>
           <div style={{ color: 'var(--ink-soft)', marginBottom: 18 }}>Nothing needs your judgment right now — here's how to get ahead:</div>
           <div className="grid2" style={{ textAlign: 'left', maxWidth: 640, margin: '0 auto' }}>
             {deck.aboveBeyond.map((ab: any, i: number) => (
@@ -108,7 +108,7 @@ export function Today() {
             <div className="deck-card">
               <div className={'stripe st-' + card.stripe} />
               <div className="dk-head">
-                <span className={'actor ' + (card.type.startsWith('⚡') ? 'sys' : card.type.startsWith('↪') ? 'handed' : 'you')}>{card.type}</span>
+                <span className={'actor ' + (card.type.startsWith('') ? 'sys' : card.type.startsWith('↪') ? 'handed' : 'you')}>{card.type}</span>
                 <span className="dk-age mono">{card.age ? 'since ' + card.age : ''}</span>
               </div>
               <div className="dk-title serif">{card.title}</div>
@@ -117,7 +117,7 @@ export function Today() {
                 {card.patientId && card.sub ? ' · ' : ''}{card.sub}
               </div>
               <div className="dk-outcome">{card.outcome}</div>
-              <div className="dk-rec"><b>⚡ System recommends:</b> {card.recommend}</div>
+              <div className="dk-rec"><b>System recommends:</b> {card.recommend}</div>
               <div className="dk-tiles">
                 {card.tiles.map((t, i) => <div key={i} className="dk-tile"><div className="tv mono">{t.v}</div><div className="tl">{t.l}</div></div>)}
               </div>

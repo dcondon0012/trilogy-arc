@@ -122,7 +122,7 @@ export function ProviderPortal({ user, onLogout }: { user: User; onLogout: () =>
                         if (!v.whenAt) throw new Error('Pick the date/time');
                         const r = await api('POST', '/portal/provider/appointment', { patientId: detail.id, whenAt: v.whenAt.replace('T', ' '), note: v.note });
                         return r.message;
-                      }} />)}>📅 Report booked appointment</button>
+                      }} />)}>Report booked appointment</button>
                 </div></div></div>
               <div className="card"><div className="chead"><h3>Messages</h3></div><div className="cbody"><Thread pid={detail.id} /></div></div>
             </div>
@@ -132,8 +132,8 @@ export function ProviderPortal({ user, onLogout }: { user: User; onLogout: () =>
                 {detail.bills.filter((b: any) => !b.voided).map((b: any) => (
                   <tr key={b.id}>
                     <td>{fmtDate(b.dos)}</td><td>{fmt$(b.billed)}</td>
-                    <td>{b.billFileId ? <span className="pdf" onClick={() => window.open('/api/portal/files/' + b.billFileId)}>🧾</span> : '—'}</td>
-                    <td>{b.noteFileId ? <span className="pdf" onClick={() => window.open('/api/portal/files/' + b.noteFileId)}>📋</span> : <span className="badge b-amber">needed</span>}</td>
+                    <td>{b.billFileId ? <span className="pdf" onClick={() => window.open('/api/portal/files/' + b.billFileId)}></span> : '—'}</td>
+                    <td>{b.noteFileId ? <span className="pdf" onClick={() => window.open('/api/portal/files/' + b.noteFileId)}></span> : <span className="badge b-amber">needed</span>}</td>
                     <td>{b.status === 'paid' ? <span className="badge b-green">✓ Paid {b.paidDate}</span>
                       : b.denied ? <span className="badge b-red">Denied — {b.denialReason}</span>
                       : (b.hasBill && b.hasNote) ? <span className="badge b-blue">Approved — payment scheduled</span>
@@ -145,7 +145,7 @@ export function ProviderPortal({ user, onLogout }: { user: User; onLogout: () =>
 
         {tab === 'patients' && !detail && (
           <div className="card">
-            <div className="chead"><input placeholder="🔍 Search your patients…" value={q} onChange={e => setQ(e.target.value)} style={{ ...inp, width: 260 }} />
+            <div className="chead"><input placeholder="⌕ Search your patients…" value={q} onChange={e => setQ(e.target.value)} style={{ ...inp, width: 260 }} />
               <span style={{ fontSize: 12, color: 'var(--muted)' }}>{patients.length} patients</span></div>
             <div className="cbody">
               <table><tbody>
@@ -310,7 +310,7 @@ function ProviderSubmit({ patients, onDone }: { patients: any[]; onDone: () => v
         {msg && <div className="badge b-green" style={{ display: 'block', padding: 10, marginBottom: 12 }}>✓ {msg}</div>}
         <div className="mfield" style={{ maxWidth: 380, marginBottom: 12 }}>
           <label>Patient* (type to search)</label>
-          <input placeholder="🔍 name or ID" value={patientId ? (patients.find(p => p.patientId === patientId)?.patientName + ' · ' + patientId) : patientQ}
+          <input placeholder="⌕ name or ID" value={patientId ? (patients.find(p => p.patientId === patientId)?.patientName + ' · ' + patientId) : patientQ}
             onChange={e => { setPatientQ(e.target.value); setPatientId(''); }} />
           {patientQ && !patientId && (
             <div style={{ border: '1px solid var(--line)', borderRadius: 8, marginTop: 4 }}>
@@ -371,14 +371,14 @@ export function CarrierPortal({ user, onLogout }: { user: User; onLogout: () => 
       {setup && <CarrierWizard insurerId={user.orgId || ''} insurerName={data.org?.name || ''} mode="portal" onClose={() => setSetup(false)} />}
       <div className="page">
         <div className="tabs">
-          {(([['refer', '📤 Send Us a Patient'], ['cases', isOrgAdmin ? `All Cases (${data.cases.length})` : `My Active Cases (${data.cases.length})`]] as [string, string][])
+          {(([['refer', 'Send Us a Patient'], ['cases', isOrgAdmin ? `All Cases (${data.cases.length})` : `My Active Cases (${data.cases.length})`]] as [string, string][])
             .concat(isOrgAdmin ? [['roster', 'Adjuster Roster']] : []) as [typeof tab, string][]).map(([k, l]) => (
             <div key={k} className={'tab' + (tab === k ? ' active' : '')} onClick={() => { setTab(k); setCaseView(null); }}>{l}</div>))}
         </div>
 
         {tab === 'cases' && !caseView && (
           <div className="card">
-            <div className="chead"><input placeholder="🔍 Search name, case ID, or claim #…" value={q} onChange={e => setQ(e.target.value)} style={{ ...inp, width: 280 }} />
+            <div className="chead"><input placeholder="⌕ Search name, case ID, or claim #…" value={q} onChange={e => setQ(e.target.value)} style={{ ...inp, width: 280 }} />
               <span style={{ fontSize: 12, color: 'var(--muted)' }}>{cases.length} shown</span></div>
             <div className="cbody">
               <table><tbody>
@@ -417,21 +417,21 @@ export function CarrierPortal({ user, onLogout }: { user: User; onLogout: () => 
                   const ref = prompt('Check / ACH reference:') || '';
                   const r = await api('POST', '/portal/carrier/report-payment', { patientId: caseView.id, amount, ref });
                   alert(r.message);
-                }}>💵 Report a payment sent</button>
+                }}>Report a payment sent</button>
               </div></div>
               <div className="card"><div className="chead"><h3>Case messages</h3></div>
                 <div className="cbody"><Thread pid={caseView.id} /></div></div>
             </div>
             <div className="card"><div className="chead"><h3>Bills & records</h3>
-              {!caseView.consentOnFile && <span className="badge b-amber">🔒 Documents unlock once the patient's records-sharing consent is signed</span>}</div>
+              {!caseView.consentOnFile && <span className="badge b-amber">Documents unlock once the patient's records-sharing consent is signed</span>}</div>
               <div className="cbody">
                 <table><tbody>
                   <tr><th>Provider</th><th>DOS</th><th>Billed</th><th>Bill</th><th>Records</th></tr>
                   {caseView.bills.map((b: any) => (
                     <tr key={b.id}>
                       <td>{b.providerName}</td><td>{fmtDate(b.dos)}</td><td>{fmt$(b.billed)}</td>
-                      <td>{b.billFileId ? <span className="pdf" onClick={() => window.open('/api/portal/files/' + b.billFileId)}>🧾 {b.billFileName || 'Bill'}</span> : '—'}</td>
-                      <td>{b.noteFileId ? <span className="pdf" onClick={() => window.open('/api/portal/files/' + b.noteFileId)}>📋 {b.noteFileName || 'Notes'}</span> : '—'}</td>
+                      <td>{b.billFileId ? <span className="pdf" onClick={() => window.open('/api/portal/files/' + b.billFileId)}>{b.billFileName || 'Bill'}</span> : '—'}</td>
+                      <td>{b.noteFileId ? <span className="pdf" onClick={() => window.open('/api/portal/files/' + b.noteFileId)}>{b.noteFileName || 'Notes'}</span> : '—'}</td>
                     </tr>))}
                   {!caseView.bills.length && <tr><td colSpan={5} style={{ color: 'var(--muted)' }}>No bills submitted yet.</td></tr>}
                 </tbody></table>
@@ -513,7 +513,7 @@ function ReferForm({ isOrgAdmin, myAdjusterName, roster, onDone }: any) {
             </select></div>
           <div className="mfield full"><label>Assigned adjuster {isOrgAdmin ? '(type to search the roster)' : ''}</label>
             {isOrgAdmin ? (<>
-              <input list="adjdl" placeholder="🔍 adjuster name" value={v.adjusterName || ''} onChange={set('adjusterName')} autoComplete="off" />
+              <input list="adjdl" placeholder="⌕ adjuster name" value={v.adjusterName || ''} onChange={set('adjusterName')} autoComplete="off" />
               <datalist id="adjdl">{roster.map((a: any) => <option key={a.id} value={a.name} />)}</datalist>
             </>) : (
               <input value={myAdjusterName || 'Your adjuster account'} disabled />

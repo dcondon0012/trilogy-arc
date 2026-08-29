@@ -13,6 +13,7 @@ import {
   billChecks, duplicateBillIds, envelope, rankProviders, caseHealth, stripExtras,
   driftReport, carrierTier, providerScore, carrierReport, outboundDrafts, normFor,
 } from './engines.js';
+import { medicareFor } from './fees.js';
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -28,6 +29,18 @@ const fmtDate = (iso?: string | null) => {
   return m ? `${m[2]}/${m[3]}/${m[1]}` : String(iso);
 };
 const fmt$ = (n: number) => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/* Payout secrecy: outside the admin-only Financials tab, provider payments display as
+   paid-in-full at the billed amount. Non-admin staff payloads never carry payout (rate)
+   or contracted-revenue figures — the backend still pays at the contracted rate. */
+function stripPayout(p: any, role: string) {
+  if (!p || role === 'admin') return p;
+  p.bills = (p.bills || []).map(({ rate, revenue, ...b }: any) => b);
+  return p;
+}
+type Rq = { user?: { role: string } };
+const sendPatient = (req: any, res: any, pid: string, extra?: Record<string, any>) =>
+  res.json({ ...stripPayout(fullPatient(pid), req.user!.role), ...(extra || {}) });
 
 export const api = Router();
 api.use(requireAuth);
@@ -140,7 +153,7 @@ api.post('/intake/:iid/process', (req, res) => {
     }
     db.prepare("UPDATE intake_items SET status='processed', patientId=?, providerId=?, processedBy=? WHERE id=?")
       .run(patientId, providerId, req.user!.name, it.id);
-    addNote(patientId, `Bill processed from ${it.channel} intake: DOS ${fmtDate(v.dos)} · ${fmt$(billed)}${items.length ? ` · ${items.length} CPT line${items.length === 1 ? '' : 's'}` : ''}${flags.length ? ' ⚠ fee schedule: ' + flags.join('; ') : ''}`, req.user!.name);
+    addNote(patientId, `Bill processed from ${it.channel} intake: DOS ${fmtDate(v.dos)} · ${fmt$(billed)}${items.length ? ` · ${items.length} CPT line${items.length === 1 ? '' : 's'}` : ''}${flags.length ? ' fee schedule: ' + flags.join('; ') : ''}`, req.user!.name);
     audit(req.user!, 'intake.process', 'bill', bid);
     return res.json({ ok: true, billId: bid, feeFlags: flags });
   }
@@ -179,11 +192,11 @@ api.post('/bills/:bid/denial', (req, res) => {
     ? `Bill DENIED by carrier (DOS ${fmtDate(b.dos)}): ${denialReason}${appealStatus && appealStatus !== 'none' ? ' — appeal: ' + appealStatus : ''}`
     : `Denial cleared on DOS ${fmtDate(b.dos)} bill`, req.user!.name);
   audit(req.user!, 'bill.denial', 'bill', b.id, denied ? denialReason : 'cleared');
-  res.json(fullPatient(b.patientId));
+  sendPatient(req, res, b.patientId);
 });
 
 /* ---- contracted rates (carrier prices & provider payouts per CPT) ---- */
-api.get('/rates/:kind(carrier|provider)/:id', (req, res) => {
+api.get('/rates/:kind(carrier|provider)/:id', requireAdmin, (req, res) => {
   const t = req.params.kind === 'carrier' ? 'carrier_rates' : 'provider_rates';
   const col = req.params.kind === 'carrier' ? 'insurerId' : 'providerId';
   res.json(db.prepare(`SELECT * FROM ${t} WHERE ${col}=? ORDER BY cpt`).all(req.params.id));
@@ -241,7 +254,7 @@ api.get('/patients/:id/batch-packet', (req, res) => {
 <table><tr><th>Provider</th><th>DOS</th><th>Billed</th><th>Visit note</th></tr>${rows}
 <tr><th colspan="2">TOTAL</th><th style="text-align:right">$${total.toFixed(2)}</th><th></th></tr></table>
 <p>All itemized bills and treatment records for the above dates of service are enclosed. Please remit one payment for the total to Trilogy Medical Networks per the master services agreement.</p>
-<button onclick="print()">🖨 Print / Save as PDF</button></body></html>`);
+<button onclick="print()">Print / Save as PDF</button></body></html>`);
 });
 
 /* ---- fee schedule admin ---- */
@@ -275,15 +288,20 @@ api.get('/deck', (req, res) => {
     const fc = billChecks(b);
     const ckTiles = fc.checks.map(c => tile(c.status === 'pass' ? '✓' : c.status === 'warn' ? '~' : '✕', c.label.toLowerCase().replace('coverage ', '').replace(' vs contract', '≤contract').replace(' on file', '')));
     if (fc.verdict === 'green') {
+      // Payout figures are admin-only; coordinators release at the contracted rate without seeing it.
+      const showMoney = req.user!.role === 'admin';
       cards.push({
-        id: 'pay-' + b.id, type: '⚡ Four-check clear · payment release', stripe: 'green', actor: 'sys',
-        title: `Pay ${b.prName} — ${fmt$(b.rate)}`, patientId: b.patientId, patientName: pName(b.patientId),
+        id: 'pay-' + b.id, type: 'Four-check clear · payment release', stripe: 'green', actor: 'sys',
+        title: showMoney ? `Pay ${b.prName} — ${fmt$(b.rate)}` : `Pay ${b.prName} — contracted rate`,
+        patientId: b.patientId, patientName: pName(b.patientId),
         sub: `DOS ${fmtDate(b.dos)} · billed ${fmt$(b.billed)} · auth ✓ envelope ✓ rate ✓ agreement ✓`,
         outcome: `Provider paid on time at the contracted rate — relationship protected, no over-payment.`,
-        recommend: `Release ${fmt$(b.rate)}. All four checks green${b.revenue ? `, margin ${fmt$(b.revenue - b.rate)} locked` : ''}.`,
+        recommend: showMoney
+          ? `Release ${fmt$(b.rate)}. All four checks green${b.revenue ? `, margin ${fmt$(b.revenue - b.rate)} locked` : ''}.`
+          : `Release the payment — all four checks green, rate locked by contract.`,
         tiles: ckTiles,
         actions: [
-          { label: `✓ Pay ${fmt$(b.rate)}`, method: 'POST', path: `/bills/${b.id}/pay`, style: 'primary' },
+          { label: showMoney ? `✓ Pay ${fmt$(b.rate)}` : '✓ Release payment', method: 'POST', path: `/bills/${b.id}/pay`, style: 'primary' },
           { label: 'Void', method: 'PROMPT-VOID', path: `/bills/${b.id}/void` },
         ],
         chips: ['Open the case', 'View the bill'],
@@ -319,7 +337,7 @@ api.get('/deck', (req, res) => {
       recommend: `Void the duplicate (reason auto-noted) — or keep it if the visits were genuinely separate.`,
       tiles: [tile(fmt$(b.billed), 'billed'), tile(fmtDate(b.dos), 'dos'), tile('dup?', 'flag'), tile(b.prName.split(' ')[0], 'provider')],
       actions: [
-        { label: '🗑 Void as duplicate', method: 'POST', path: `/bills/${b.id}/void`, body: { reason: 'Duplicate bill — same provider/DOS/amount' }, style: 'primary' },
+        { label: 'Void as duplicate', method: 'POST', path: `/bills/${b.id}/void`, body: { reason: 'Duplicate bill — same provider/DOS/amount' }, style: 'primary' },
         { label: 'Keep — separate visit', method: 'POST', path: `/patients/${b.patientId}/notes`, body: { text: `Duplicate flag reviewed on ${b.prName} DOS ${fmtDate(b.dos)} ${fmt$(b.billed)} — kept as a separate visit` } },
       ],
       chips: ['Open the case'], age: b.dos,
@@ -355,7 +373,7 @@ api.get('/deck', (req, res) => {
     const remaining = (pt?.uwLimit || 0) - outside - usage;
     const fits = amt > 0 && amt <= remaining;
     cards.push({
-      id: 'auth-' + t.id, type: fits ? '⚡ Auth request · within envelope' : '◉ Auth request · utilization check', stripe: fits ? 'blue' : 'amber', actor: fits ? 'sys' : 'you',
+      id: 'auth-' + t.id, type: fits ? 'Auth request · within envelope' : '◉ Auth request · utilization check', stripe: fits ? 'blue' : 'amber', actor: fits ? 'sys' : 'you',
       title: t.title.replace('Auth request from ', 'More auth — '), patientId: t.patientId, patientName: pName(t.patientId),
       sub: `Coverage remaining ${fmt$(remaining)}${amt ? ` · request ${fmt$(amt)}` : ''}`,
       outcome: `Care continues without delay — and only as much as the coverage supports.`,
@@ -399,7 +417,7 @@ api.get('/deck', (req, res) => {
       tiles: [tile(fmtDate(t.due), 'was due'), tile(t.by, 'from'), tile(t.created.split(',')[0], 'created'), tile('—', '')],
       actions: [
         { label: '✓ Done', method: 'POST', path: `/tasks/${t.id}/complete`, style: 'primary' },
-        { label: '⏩ Push out', method: 'PROMPT-SNOOZE', path: `/tasks/${t.id}/snooze` },
+        { label: 'Push out', method: 'PROMPT-SNOOZE', path: `/tasks/${t.id}/snooze` },
       ],
       chips: ['Open the case'], age: t.due,
     });
@@ -431,7 +449,7 @@ api.get('/deck', (req, res) => {
         sub: 'Verify where the flow of funds is going',
         outcome: `Funds flow stays with Trilogy per the agreements — or we know today that it doesn't.`,
         recommend: `Call the adjuster; confirm payment routing; document.`,
-        tiles: [tile('PIP', 'line'), tile('⚠', 'risk'), tile('—', ''), tile('—', '')],
+        tiles: [tile('PIP', 'line'), tile('', 'risk'), tile('—', ''), tile('—', '')],
         actions: [{ label: '✓ Verified — note it', method: 'POST', path: `/patients/${p.id}/notes`, body: { text: 'Attorney-involvement funds-flow verification completed' }, style: 'primary' }],
         chips: ['Open the case'], age: today,
       });
@@ -704,7 +722,7 @@ api.post('/bills/:bid/reduce-to-contract', (req, res) => {
   const prName = (db.prepare('SELECT name FROM providers WHERE id=?').get(b.providerId) as any)?.name || b.providerId;
   addNote(b.patientId, `Bill reduced to contracted rate: ${prName} DOS ${fmtDate(b.dos)} — ${fmt$(old)} → ${fmt$(b.revenue)} (contract is the price)`, req.user!.name);
   audit(req.user!, 'bill.reduceToContract', 'bill', b.id, `${old} -> ${b.revenue}`);
-  res.json(fullPatient(b.patientId));
+  sendPatient(req, res, b.patientId);
 });
 
 /* EOB capture (Trilopay side). */
@@ -716,7 +734,7 @@ api.post('/bills/:bid/eob', (req, res) => {
     .run(Number(v.allowed) || null, Number(v.paid) || null, v.note || null, nowMST(), b.id);
   addNote(b.patientId, `EOB recorded on DOS ${fmtDate(b.dos)}: allowed ${fmt$(Number(v.allowed) || 0)} · paid ${fmt$(Number(v.paid) || 0)}${v.note ? ' — ' + v.note : ''}`, req.user!.name);
   audit(req.user!, 'bill.eob', 'bill', b.id);
-  res.json(fullPatient(b.patientId));
+  sendPatient(req, res, b.patientId);
 });
 
 /* One-time agreements. */
@@ -787,7 +805,7 @@ api.post('/patients/:id/appointments', (req, res) => {
     .run(req.params.id, v.providerId || null, v.whenAt, v.note || null, req.user!.name, nowMST());
   addNote(req.params.id, `Appointment scheduled ${fmtDate(v.whenAt)}${v.note ? ' — ' + v.note : ''}`, req.user!.name);
   audit(req.user!, 'appointment.create', 'patient', req.params.id);
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
 /* Growth workspace. */
@@ -984,7 +1002,7 @@ api.get('/search', (req, res) => {
 api.get('/patients/:id', (req, res) => {
   const p = fullPatient(req.params.id);
   if (!p) return res.status(404).json({ error: 'Not found' });
-  res.json(p);
+  res.json(stripPayout(p, req.user!.role));
 });
 
 api.post('/patients', (req, res) => {
@@ -1034,7 +1052,7 @@ api.post('/patients', (req, res) => {
   }
   addNote(id, 'Profile created', req.user!.name);
   audit(req.user!, 'patient.create', 'patient', id, v.name);
-  res.json(fullPatient(id));
+  sendPatient(req, res, id);
 });
 
 api.patch('/patients/:id', (req, res) => {
@@ -1042,15 +1060,15 @@ api.patch('/patients/:id', (req, res) => {
   const p = db.prepare('SELECT * FROM patients WHERE id=?').get(id) as any;
   if (!p) return res.status(404).json({ error: 'Not found' });
   const v = req.body || {};
-  const cols = ['name', 'caseType', 'phone', 'email', 'address', 'dob', 'doi', 'state', 'insurerId', 'claimNumber', 'policyNumber', 'adjusterId', 'accident', 'attorneyRetained', 'attorneyDate', 'attorneyFirm', 'escalated', 'agentName', 'agentContact', 'agentAuth', 'referralSource', 'carrierConfirmed', 'consentSharing'];
+  const cols = ['name', 'caseType', 'phone', 'email', 'address', 'dob', 'doi', 'state', 'insurerId', 'claimNumber', 'policyNumber', 'adjusterId', 'accident', 'attorneyRetained', 'attorneyDate', 'attorneyFirm', 'escalated', 'agentName', 'agentContact', 'agentAuth', 'referralSource', 'carrierConfirmed', 'consentSharing', 'carrierAuthorized'];
   if ('carrierConfirmed' in v && Number(v.carrierConfirmed) === 1)
     addNote(id, '✓ Coverage verified with carrier — case cleared to proceed', req.user!.name);
   if ('attorneyRetained' in v && Number(v.attorneyRetained) === 1 && !(db.prepare('SELECT attorneyRetained FROM patients WHERE id=?').get(id) as any).attorneyRetained)
-    addNote(id, `⚠ ATTORNEY RETAINED${v.attorneyFirm ? ': ' + v.attorneyFirm : ''}${v.attorneyDate ? ' (as of ' + fmtDate(v.attorneyDate) + ')' : ''} — thesis metric recorded`, req.user!.name);
+    addNote(id, `ATTORNEY RETAINED${v.attorneyFirm ? ': ' + v.attorneyFirm : ''}${v.attorneyDate ? ' (as of ' + fmtDate(v.attorneyDate) + ')' : ''} — thesis metric recorded`, req.user!.name);
   for (const c of cols) if (c in v) db.prepare(`UPDATE patients SET ${c}=? WHERE id=?`).run(v[c] === '' ? null : v[c], id);
   addNote(id, 'Profile details edited', req.user!.name);
   audit(req.user!, 'patient.update', 'patient', id);
-  res.json(fullPatient(id));
+  sendPatient(req, res, id);
 });
 
 api.post('/patients/:id/stage', (req, res) => {
@@ -1064,7 +1082,7 @@ api.post('/patients/:id/stage', (req, res) => {
   recordStage(id, stage);
   addNote(id, `Status changed: ${STAGES[p.stage]} → ${STAGES[stage]}`, req.user!.name);
   audit(req.user!, 'patient.stage', 'patient', id, STAGES[stage]);
-  res.json(fullPatient(id));
+  sendPatient(req, res, id);
 });
 
 api.post('/patients/:id/coordinator', (req, res) => {
@@ -1074,7 +1092,7 @@ api.post('/patients/:id/coordinator', (req, res) => {
   db.prepare('UPDATE patients SET coordinator=? WHERE id=?').run(req.body.coordinator, id);
   addNote(id, 'Coordinator assigned: ' + u.name, req.user!.name);
   audit(req.user!, 'patient.coordinator', 'patient', id, u.name);
-  res.json(fullPatient(id));
+  sendPatient(req, res, id);
 });
 
 api.post('/patients/:id/companion', (req, res) => {
@@ -1090,7 +1108,7 @@ api.post('/patients/:id/companion', (req, res) => {
     addNote(id, `Companion claim linked: ${c?.name} (${cid})`, req.user!.name);
   } else addNote(id, 'Companion claim unlinked', req.user!.name);
   audit(req.user!, 'patient.companion', 'patient', id, cid ?? 'unlinked');
-  res.json(fullPatient(id));
+  sendPatient(req, res, id);
 });
 
 /* ---- case messages (staff side of portal threads) ---- */
@@ -1100,7 +1118,7 @@ api.post('/patients/:id/messages', (req, res) => {
   db.prepare('INSERT INTO case_messages(patientId,authorName,authorType,text,time) VALUES(?,?,?,?,?)')
     .run(req.params.id, req.user!.name, 'staff', text, nowMST());
   audit(req.user!, 'message.send', 'patient', req.params.id);
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
 /* ---- notes ---- */
@@ -1111,7 +1129,7 @@ api.post('/patients/:id/notes', (req, res) => {
   addNote(req.params.id, text, req.user!.name, false);
   db.prepare('UPDATE notes SET sys=0 WHERE id=(SELECT MAX(id) FROM notes WHERE patientId=?)').run(req.params.id);
   audit(req.user!, 'note.add', 'patient', req.params.id);
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
 /* ---- tasks ---- */
@@ -1123,7 +1141,7 @@ api.post('/patients/:id/tasks', (req, res) => {
     .run(tid, req.params.id, title, req.body?.due || null, nowMST(), req.user!.name);
   addNote(req.params.id, `Task created: "${title}"` + (req.body?.due ? ` (due ${fmtDate(req.body.due)})` : ''), req.user!.name);
   audit(req.user!, 'task.create', 'task', tid, title);
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
 api.post('/tasks/:tid/snooze', (req, res) => {
@@ -1134,7 +1152,7 @@ api.post('/tasks/:tid/snooze', (req, res) => {
   db.prepare('UPDATE tasks SET due=? WHERE id=?').run(due, t.id);
   addNote(t.patientId, `Task pushed out: "${t.title}" — ${fmtDate(t.due)} → ${fmtDate(due)}`, req.user!.name);
   audit(req.user!, 'task.snooze', 'task', t.id, due);
-  res.json(fullPatient(t.patientId));
+  sendPatient(req, res, t.patientId);
 });
 
 api.post('/tasks/:tid/complete', (req, res) => {
@@ -1143,7 +1161,7 @@ api.post('/tasks/:tid/complete', (req, res) => {
   db.prepare('DELETE FROM tasks WHERE id=?').run(t.id);
   addNote(t.patientId, `Task completed: "${t.title}"`, req.user!.name);
   audit(req.user!, 'task.complete', 'task', t.id, t.title);
-  res.json(fullPatient(t.patientId));
+  sendPatient(req, res, t.patientId);
 });
 
 api.post('/tasks/:tid/comments', (req, res) => {
@@ -1153,7 +1171,7 @@ api.post('/tasks/:tid/comments', (req, res) => {
   if (!text) return res.status(400).json({ error: 'Empty comment' });
   db.prepare('INSERT INTO task_comments(taskId,text,by,time) VALUES(?,?,?,?)').run(t.id, text, req.user!.name, nowMST());
   audit(req.user!, 'task.comment', 'task', t.id);
-  res.json(fullPatient(t.patientId));
+  sendPatient(req, res, t.patientId);
 });
 
 /* ---- underwriting ---- */
@@ -1163,7 +1181,7 @@ api.patch('/patients/:id/uw', (req, res) => {
     .run(v.status ?? 'Not started', v.coverage ?? null, Number(v.limit) || 0, v.riskFlags ?? null, v.approvedBy ?? null, req.params.id);
   addNote(req.params.id, `Underwriting updated (${v.status})`, req.user!.name);
   audit(req.user!, 'uw.update', 'patient', req.params.id);
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
 api.post('/patients/:id/outside-bills', (req, res) => {
@@ -1173,7 +1191,7 @@ api.post('/patients/:id/outside-bills', (req, res) => {
   db.prepare('INSERT INTO outside_bills(patientId,descr,amt) VALUES(?,?,?)').run(req.params.id, descr, amt);
   addNote(req.params.id, `Outside medical bill added: ${descr} ${fmt$(amt)} — coverage remaining recalculated`, req.user!.name);
   audit(req.user!, 'uw.outsideBill.add', 'patient', req.params.id, `${descr} ${amt}`);
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
 api.delete('/outside-bills/:obid', (req, res) => {
@@ -1182,7 +1200,7 @@ api.delete('/outside-bills/:obid', (req, res) => {
   db.prepare('DELETE FROM outside_bills WHERE id=?').run(ob.id);
   addNote(ob.patientId, `Outside medical bill removed: ${ob.descr} ${fmt$(ob.amt)}`, req.user!.name);
   audit(req.user!, 'uw.outsideBill.remove', 'patient', ob.patientId);
-  res.json(fullPatient(ob.patientId));
+  sendPatient(req, res, ob.patientId);
 });
 
 /* ---- provider links & authorizations ---- */
@@ -1195,17 +1213,25 @@ api.post('/patients/:id/provlinks', (req, res) => {
   } catch { return res.status(400).json({ error: 'Provider already linked' }); }
   addNote(req.params.id, `Provider linked: ${pr.name}${branch ? ` (${branch})` : ''} — status: Pending`, req.user!.name);
   audit(req.user!, 'provlink.create', 'patient', req.params.id, providerId);
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
 api.post('/provlinks/:lid/action', (req, res) => {
   const l = db.prepare('SELECT * FROM prov_links WHERE id=?').get(req.params.lid) as any;
   if (!l) return res.status(404).json({ error: 'Not found' });
-  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(l.providerId) as any;
+  const pr = db.prepare('SELECT name, corpEmail FROM providers WHERE id=?').get(l.providerId) as any;
   const kind = String(req.body?.kind);
   const amount = Number(req.body?.amount) || 0;
-  const sd = (name: string) => db.prepare('INSERT INTO sent_docs(patientId,name,toStr,time,status,method) VALUES(?,?,?,?,?,?)')
-    .run(l.patientId, name, pr.name, nowMST(), 'Sent', 'Email');
+  // Each send creates the actual document (printable at the returned URL) and a
+  // prewritten email draft (mailto) — the client opens both. Attachment rides
+  // automatically once the email integration lands.
+  let sentId: number | null = null;
+  const sd = (name: string) => {
+    const info = db.prepare('INSERT INTO sent_docs(patientId,name,toStr,time,status,method,meta) VALUES(?,?,?,?,?,?,?)')
+      .run(l.patientId, name, pr.name, nowMST(), 'Sent', 'Email',
+        JSON.stringify({ kind, amount: amount || null, providerId: l.providerId, branch: l.branch || null }));
+    sentId = Number(info.lastInsertRowid);
+  };
 
   if (kind === 'auth' || kind === 'addauth') {
     if (!(amount > 0)) return res.status(400).json({ error: 'Authorization amount must be positive' });
@@ -1227,7 +1253,66 @@ api.post('/provlinks/:lid/action', (req, res) => {
   } else return res.status(400).json({ error: 'Unknown action' });
 
   audit(req.user!, 'provlink.' + kind, 'patient', l.patientId, pr.name);
-  res.json(fullPatient(l.patientId));
+  const pt = db.prepare('SELECT name FROM patients WHERE id=?').get(l.patientId) as any;
+  const docName = kind === 'auth' ? 'Authorization' : kind === 'addauth' ? "Add'l Authorization" : kind === 'reqform' ? "Add'l Authorization Request Form" : 'Cancellation of Authorization Form';
+  sendPatient(req, res, l.patientId, sentId ? {
+    _doc: {
+      url: `/api/patients/${l.patientId}/sentdoc/${sentId}/print`,
+      mailto: `mailto:${encodeURIComponent(pr.corpEmail || '')}`
+        + `?subject=${encodeURIComponent(`${docName} — ${pt?.name} (${l.patientId}) — Trilogy Medical Networks`)}`
+        + `&body=${encodeURIComponent(`Hi ${pr.name} team,\n\nPlease find attached the ${docName.toLowerCase()} for ${pt?.name} (case ${l.patientId})${amount ? ` in the amount of ${fmt$(amount)}` : ''}.\n\n${kind === 'cxl' ? 'Please verify all transactions on the case, sign, and return the form.\n\n' : kind === 'reqform' ? 'Please complete and return the form so we can process the additional authorization.\n\n' : 'Treatment within this authorization is payable at the contracted rate as bills and visit notes are received.\n\n'}Thank you,\nTrilogy Medical Networks\ntrilogyconnections.com`)}`,
+    },
+  } : undefined);
+});
+
+/* Edit the authorized total after the fact (audited; the four-check recalculates). */
+api.patch('/provlinks/:lid', (req, res) => {
+  const l = db.prepare('SELECT * FROM prov_links WHERE id=?').get(req.params.lid) as any;
+  if (!l) return res.status(404).json({ error: 'Not found' });
+  const authAmount = Number(req.body?.authAmount);
+  if (!(authAmount >= 0)) return res.status(400).json({ error: 'Authorization total must be zero or more' });
+  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(l.providerId) as any;
+  db.prepare('UPDATE prov_links SET authAmount=? WHERE id=?').run(authAmount, l.id);
+  addNote(l.patientId, `Authorization total for ${pr?.name} corrected: ${fmt$(l.authAmount)} → ${fmt$(authAmount)}`, req.user!.name);
+  audit(req.user!, 'provlink.authEdit', 'patient', l.patientId, `${pr?.name}: ${l.authAmount} → ${authAmount}`);
+  sendPatient(req, res, l.patientId);
+});
+
+/* Printable document for any sent doc (authorizations and templated letters). */
+api.get('/patients/:id/sentdoc/:sid/print', (req, res) => {
+  const d = db.prepare('SELECT * FROM sent_docs WHERE id=? AND patientId=?').get(req.params.sid, req.params.id) as any;
+  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(req.params.id) as any;
+  if (!d || !p) return res.status(404).json({ error: 'Not found' });
+  let meta: any = {}; try { meta = JSON.parse(d.meta || '{}'); } catch { /* older rows */ }
+  const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const row = (k: string, v: any) => v ? `<tr><td class="k">${k}</td><td>${esc(v)}</td></tr>` : '';
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(d.name)} — ${esc(p.name)}</title>
+<style>body{font:14px/1.6 Arial,Helvetica,sans-serif;color:#2A3346;max-width:720px;margin:0 auto;padding:48px 40px}
+h1{font-size:24px;color:#2D3647;margin:0 0 2px} .tri{color:#45A8EB}
+.sub{color:#5A6474;font-size:12.5px;margin-bottom:26px}
+table{width:100%;border-collapse:collapse;margin:18px 0}
+td{border:1px solid #E5E2D6;padding:9px 12px;font-size:13.5px} td.k{width:210px;background:#F7F6F1;font-weight:700}
+.body{margin:20px 0;font-size:14px} .sig{margin-top:56px;display:flex;gap:40px}
+.sig div{flex:1;border-top:1px solid #2A3346;padding-top:6px;font-size:12px;color:#5A6474}
+.print{margin-top:30px} @media print{.print{display:none}}</style></head><body>
+<h1>tril<span class="tri">△</span>gy &nbsp;·&nbsp; ${esc(d.name)}</h1>
+<div class="sub">Trilogy Medical Networks · trilogyconnections.com · Document #SD-${d.id} · ${esc(d.time)}</div>
+<table>
+${row('Patient', `${p.name} (${p.id})`)}${row('Date of injury', p.doi)}${row('Claim #', p.claimNumber)}
+${row('Provider', d.toStr)}${row('Branch', meta.branch)}
+${meta.amount ? row('Authorized amount', fmt$(meta.amount)) : ''}
+${row('Case type', p.caseType === 'trilogy' ? 'Third-party bodily injury' : 'PIP / first party')}
+</table>
+<div class="body">${meta.kind === 'cxl'
+    ? 'This document cancels the outstanding treatment authorization for the patient above. Please verify all dates of service and outstanding balances on this case, sign below, and return this form to Trilogy Medical Networks. No further treatment under the prior authorization is payable after the cancellation date.'
+    : meta.kind === 'reqform'
+    ? 'Use this form to request additional treatment authorization for the patient above. Complete the requested amount and anticipated treatment plan, sign, and return to Trilogy Medical Networks for processing.'
+    : meta.amount
+    ? `Trilogy Medical Networks authorizes treatment for the patient above up to the amount shown. Services within this authorization are payable at the contracted rate upon receipt of the itemized bill and corresponding visit note. This authorization does not direct care — treatment decisions remain with the clinician.`
+    : `This document accompanies the ${esc(d.name)} for the patient above, sent by Trilogy Medical Networks.`}</div>
+<div class="sig"><div>Trilogy Medical Networks — authorized signature</div><div>Provider acknowledgment — signature &amp; date</div></div>
+<button class="print" onclick="print()">Print / Save as PDF</button>
+</body></html>`);
 });
 
 /* ---- bills / receipts / payments ---- */
@@ -1247,10 +1332,8 @@ api.post('/patients/:id/bills', (req, res) => {
   const pRow = db.prepare('SELECT insurerId FROM patients WHERE id=?').get(req.params.id) as any;
   const eco = computeBillEconomics(pRow?.insurerId || null, v.providerId, link.branch, lineItems, billedIn, v.dos || null);
   let rate = Number(v.rate) || eco.payout || 0;
-  let rateNote = '';
-  if (!Number(v.rate) && eco.payout) rateNote = ` · payout auto: ${fmt$(eco.payout)}`;
-  if (eco.revenue) rateNote += ` · contracted revenue: ${fmt$(eco.revenue)} (margin ${fmt$(eco.revenue - rate)})`;
-  if (eco.revenueMissing.length) rateNote += ` ⚠ no carrier rate on file for CPT ${eco.revenueMissing.join(', ')}`;
+  // Note text stays payout-free — financial detail lives in the admin Financials tab.
+  let rateNote = eco.revenueMissing.length ? ` — no carrier rate on file for CPT ${eco.revenueMissing.join(', ')}` : '';
   const bid = 'b' + Date.now() + Math.floor(Math.random() * 1000);
   db.prepare('INSERT INTO bills(id,patientId,providerId,dos,billed,rate,revenue) VALUES(?,?,?,?,?,?,?)')
     .run(bid, req.params.id, v.providerId, v.dos || null, Number(v.billed), rate, eco.revenue);
@@ -1260,11 +1343,12 @@ api.post('/patients/:id/bills', (req, res) => {
   db.prepare('UPDATE prov_links SET billed=billed+? WHERE patientId=? AND providerId=?').run(Number(v.billed), req.params.id, v.providerId);
   addNote(req.params.id, `Bill added: ${pr.name} · DOS ${fmtDate(v.dos)} · ${fmt$(Number(v.billed))}${rateNote} — attach the bill + visit note files to unlock payment`, req.user!.name);
   audit(req.user!, 'bill.create', 'bill', bid);
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
-/* Set/correct the payout on an unpaid bill. */
-api.patch('/bills/:bid', (req, res) => {
+/* Set/correct the payout on an unpaid bill — admin only (payout is auto-calculated;
+   corrections are the exception, and payout figures never reach non-admin staff). */
+api.patch('/bills/:bid', requireAdmin, (req, res) => {
   const b = db.prepare('SELECT * FROM bills WHERE id=?').get(req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   if (b.status === 'paid') return res.status(400).json({ error: 'Bill already paid — void it and re-enter instead' });
@@ -1272,9 +1356,9 @@ api.patch('/bills/:bid', (req, res) => {
   const rate = Number(req.body?.rate);
   if (!(rate >= 0)) return res.status(400).json({ error: 'Payout must be zero or more' });
   db.prepare('UPDATE bills SET rate=? WHERE id=?').run(rate, b.id);
-  addNote(b.patientId, `Payout corrected on DOS ${fmtDate(b.dos)} bill: ${fmt$(b.rate)} → ${fmt$(rate)}`, req.user!.name);
+  addNote(b.patientId, `Payout terms corrected on the DOS ${fmtDate(b.dos)} bill (admin adjustment — details in Financials)`, req.user!.name);
   audit(req.user!, 'bill.rateChange', 'bill', b.id, `${b.rate} → ${rate}`);
-  res.json(fullPatient(b.patientId));
+  sendPatient(req, res, b.patientId);
 });
 
 /* Void a bill (correction flow — never deletes, always audited). */
@@ -1289,9 +1373,9 @@ api.post('/bills/:bid/void', (req, res) => {
   db.prepare('DELETE FROM receipt_bills WHERE billId=?').run(b.id);
   const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(b.providerId) as any;
   addNote(b.patientId, `Bill VOIDED: ${pr?.name} · DOS ${fmtDate(b.dos)} · ${fmt$(b.billed)} — reason: ${reason}` +
-    (b.status === 'paid' ? ` ⚠ this bill was already PAID ${fmt$(b.rate)} — recover the payment separately` : ''), req.user!.name);
+    (b.status === 'paid' ? ` this bill was already PAID ${fmt$(b.rate)} — recover the payment separately` : ''), req.user!.name);
   audit(req.user!, 'bill.void', 'bill', b.id, reason);
-  res.json(fullPatient(b.patientId));
+  sendPatient(req, res, b.patientId);
 });
 
 /* Void a receipt. */
@@ -1305,7 +1389,7 @@ api.post('/receipts/:rid/void', (req, res) => {
   db.prepare('DELETE FROM receipt_bills WHERE receiptId=?').run(r.id);
   addNote(r.patientId, `Receipt VOIDED: ${fmt$(r.amount)} (${r.ref || ''}) — reason: ${reason}`, req.user!.name);
   audit(req.user!, 'receipt.void', 'receipt', String(r.id), reason);
-  res.json(fullPatient(r.patientId));
+  sendPatient(req, res, r.patientId);
 });
 
 /* Reconciliation: link a receipt to the bills it covers. */
@@ -1325,7 +1409,7 @@ api.post('/receipts/:rid/link', (req, res) => {
   tx();
   addNote(r.patientId, `Receipt ${fmt$(r.amount)} (${r.ref || ''}) reconciled to ${billIds.length} bill${billIds.length === 1 ? '' : 's'}`, req.user!.name);
   audit(req.user!, 'receipt.link', 'receipt', String(r.id), billIds.join(','));
-  res.json(fullPatient(r.patientId));
+  sendPatient(req, res, r.patientId);
 });
 
 api.post('/bills/:bid/attach/:field', upload.single('file'), (req, res) => {
@@ -1342,7 +1426,7 @@ api.post('/bills/:bid/attach/:field', upload.single('file'), (req, res) => {
   const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(b.providerId) as any;
   addNote(b.patientId, `${field === 'bill' ? 'Bill file' : 'Visit note file'} attached: "${req.file.originalname}" for DOS ${fmtDate(b.dos)} (${pr?.name || ''})`, req.user!.name);
   audit(req.user!, 'bill.attach.' + field, 'bill', b.id, req.file.originalname);
-  res.json(fullPatient(b.patientId));
+  sendPatient(req, res, b.patientId);
 });
 
 /* Uploaded files render inline only for types that can't carry scripts —
@@ -1369,9 +1453,11 @@ api.post('/bills/:bid/pay', (req, res) => {
   const paidDate = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
   db.prepare("UPDATE bills SET status='paid',paidDate=? WHERE id=?").run(paidDate, b.id);
   const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(b.providerId) as any;
-  addNote(b.patientId, `Payment sent: ${fmt$(b.rate)} to ${pr?.name} (DOS ${fmtDate(b.dos)})`, req.user!.name);
+  // Notes are visible to all staff — payments display as satisfied in full at the billed
+  // amount; the actual contracted payout lives only in the admin Financials tab.
+  addNote(b.patientId, `Payment sent to ${pr?.name} — DOS ${fmtDate(b.dos)} bill (${fmt$(b.billed)}) paid in full at the contracted terms`, req.user!.name);
   audit(req.user!, 'bill.pay', 'bill', b.id, String(b.rate));
-  res.json(fullPatient(b.patientId));
+  sendPatient(req, res, b.patientId);
 });
 
 api.post('/patients/:id/receipts', (req, res) => {
@@ -1381,7 +1467,7 @@ api.post('/patients/:id/receipts', (req, res) => {
     .run(req.params.id, v.date || null, v.ref || null, Number(v.amount), v.status || 'Pending');
   addNote(req.params.id, `Insurance receipt recorded: ${fmt$(Number(v.amount))} (${v.ref || ''})`, req.user!.name);
   audit(req.user!, 'receipt.create', 'patient', req.params.id, String(v.amount));
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
 api.post('/receipts/:rid/toggle', (req, res) => {
@@ -1392,18 +1478,27 @@ api.post('/receipts/:rid/toggle', (req, res) => {
   db.prepare('UPDATE receipts SET status=? WHERE id=?').run(status, r.id);
   addNote(r.patientId, `Receipt ${status.toLowerCase()}: ${fmt$(r.amount)} (${r.ref || ''})`, req.user!.name);
   audit(req.user!, 'receipt.toggle', 'receipt', String(r.id), status);
-  res.json(fullPatient(r.patientId));
+  sendPatient(req, res, r.patientId);
 });
 
 /* ---- sent docs & documents ---- */
 api.post('/patients/:id/sentdocs', (req, res) => {
   const v = req.body || {};
   if (!v.name) return res.status(400).json({ error: 'Template required' });
-  db.prepare('INSERT INTO sent_docs(patientId,name,toStr,time,status,method) VALUES(?,?,?,?,?,?)')
-    .run(req.params.id, v.name, v.to || '—', nowMST(), 'Sent', v.method || 'Email');
+  const info = db.prepare('INSERT INTO sent_docs(patientId,name,toStr,time,status,method,meta) VALUES(?,?,?,?,?,?,?)')
+    .run(req.params.id, v.name, v.to || '—', nowMST(), 'Sent', v.method || 'Email',
+      JSON.stringify({ kind: 'template', email: v.email || null }));
   addNote(req.params.id, `Contract sent: "${v.name}" to ${v.to || '—'} via ${v.method || 'Email'}`, req.user!.name);
   audit(req.user!, 'sentdoc.create', 'patient', req.params.id, v.name);
-  res.json(fullPatient(req.params.id));
+  const pt = db.prepare('SELECT name FROM patients WHERE id=?').get(req.params.id) as any;
+  sendPatient(req, res, req.params.id, {
+    _doc: {
+      url: `/api/patients/${req.params.id}/sentdoc/${info.lastInsertRowid}/print`,
+      mailto: `mailto:${encodeURIComponent(v.email || '')}`
+        + `?subject=${encodeURIComponent(`${v.name} — ${pt?.name} (${req.params.id}) — Trilogy Medical Networks`)}`
+        + `&body=${encodeURIComponent(`Hi,\n\nPlease find attached the ${v.name} for ${pt?.name} (case ${req.params.id}). Sign and return at your convenience — reach out with any questions.\n\nThank you,\nTrilogy Medical Networks\ntrilogyconnections.com`)}`,
+    },
+  });
 });
 
 api.post('/sentdocs/:sid/advance', (req, res) => {
@@ -1419,7 +1514,7 @@ api.post('/sentdocs/:sid/advance', (req, res) => {
     }
   }
   audit(req.user!, 'sentdoc.advance', 'sentdoc', String(d.id), status);
-  res.json(fullPatient(d.patientId));
+  sendPatient(req, res, d.patientId);
 });
 
 api.post('/patients/:id/documents', upload.single('file'), (req, res) => {
@@ -1432,10 +1527,10 @@ api.post('/patients/:id/documents', upload.single('file'), (req, res) => {
       .run(fid, name, req.file.mimetype, req.file.size, req.user!.name, nowMST());
   }
   db.prepare('INSERT INTO documents(patientId,name,cat,meta,fileId) VALUES(?,?,?,?,?)')
-    .run(req.params.id, name, req.body?.cat || 'Misc', nowMST() + ' · ' + req.user!.name, fid);
+    .run(req.params.id, name, req.body?.cat || 'Other', nowMST() + ' · ' + req.user!.name, fid);
   addNote(req.params.id, `Document added: "${name}"`, req.user!.name);
   audit(req.user!, 'document.create', 'patient', req.params.id, name);
-  res.json(fullPatient(req.params.id));
+  sendPatient(req, res, req.params.id);
 });
 
 /* ================= providers ================= */
@@ -1457,11 +1552,17 @@ api.post('/providers', (req, res) => {
 
 api.patch('/providers/:id', (req, res) => {
   const v = req.body || {};
-  const pr = db.prepare('SELECT id FROM providers WHERE id=?').get(req.params.id);
+  const pr = db.prepare('SELECT * FROM providers WHERE id=?').get(req.params.id) as any;
   if (!pr) return res.status(404).json({ error: 'Not found' });
+  // "Under contract" is DERIVED from the BAA + rate agreement being signed — a status
+  // edit can neither grant it (without the signatures) nor accidentally remove it.
+  let status: string[] = Array.isArray(v.status) ? v.status.filter(Boolean) : [];
+  const gate = !!(pr.baaSignedAt && pr.rateAgreementSignedAt);
+  status = status.filter(s => s !== 'Under contract');
+  if (gate) status.push('Under contract');
   db.prepare('UPDATE providers SET name=?,type=?,status=?,corpAddress=?,corpPhone=?,corpEmail=?,taxId=?,rules=? WHERE id=?')
-    .run(v.name, v.type || null, JSON.stringify(v.status || []), v.corpAddress || null, v.corpPhone || null, v.corpEmail || null, v.taxId || null, JSON.stringify(v.rules || []), req.params.id);
-  for (const c of ['npi', 'licenseNo', 'licenseExp', 'malpracticeCarrier', 'malpracticeExp', 'w9OnFile', 'baaSigned', 'conservative'])
+    .run(v.name, v.type || null, JSON.stringify(status), v.corpAddress || null, v.corpPhone || null, v.corpEmail || null, v.taxId || null, JSON.stringify(v.rules || []), req.params.id);
+  for (const c of ['npi', 'licenseNo', 'licenseExp', 'malpracticeCarrier', 'malpracticeExp', 'w9OnFile', 'baaSigned', 'conservative', 'orgType'])
     if (c in v) db.prepare(`UPDATE providers SET ${c}=? WHERE id=?`).run(v[c] || null, req.params.id);
   audit(req.user!, 'provider.update', 'provider', req.params.id);
   res.json(fullProvider(req.params.id));
@@ -1560,9 +1661,13 @@ api.patch('/adjusters/:aid', (req, res) => {
 api.post('/insurers/:id/contracts', (req, res) => {
   const v = req.body || {};
   if (!String(v.name || '').trim()) return res.status(400).json({ error: 'Name required' });
-  db.prepare('INSERT INTO ins_contracts(insurerId,name,meta,status) VALUES(?,?,?,?)')
-    .run(req.params.id, v.name, v.meta || null, v.status || 'Active');
-  audit(req.user!, 'insContract.create', 'insurer', req.params.id, v.name);
+  const scope = v.scope === 'adjuster' ? 'adjuster' : 'carrier';
+  if (scope === 'adjuster' && !v.adjusterId) return res.status(400).json({ error: 'Pick the adjuster for an adjuster-scope contract' });
+  // Contract rate (% of billed the carrier pays us) is admin-only — silently ignored otherwise.
+  const rate = req.user!.role === 'admin' && v.rate !== '' && v.rate != null ? Number(v.rate) : null;
+  db.prepare('INSERT INTO ins_contracts(insurerId,name,meta,status,scope,adjusterId,rate) VALUES(?,?,?,?,?,?,?)')
+    .run(req.params.id, v.name, v.meta || null, v.status || 'Active', scope, scope === 'adjuster' ? v.adjusterId : null, rate);
+  audit(req.user!, 'insContract.create', 'insurer', req.params.id, `${v.name} (${scope})`);
   res.json(fullInsurer(req.params.id));
 });
 
@@ -1683,6 +1788,217 @@ api.post('/admin/users/:uid/reset-mfa', requireAdmin, (req, res) => {
   db.prepare('UPDATE users SET totpSecret=NULL WHERE id=?').run(u.id);
   audit(req.user!, 'admin.user.resetMfa', 'user', u.id, u.name);
   res.json({ ok: true, note: 'User will enroll a fresh authenticator at next login' });
+});
+
+/* ================= bill entry v2 — files inline, payout always auto ================= */
+api.post('/patients/:id/bills2', upload.fields([{ name: 'bill', maxCount: 1 }, { name: 'note', maxCount: 1 }]), (req, res) => {
+  const v = req.body || {};
+  const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+  const billFile = files?.bill?.[0]; const noteFile = files?.note?.[0];
+  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(v.providerId) as any;
+  if (!pr) return res.status(400).json({ error: 'Unknown provider' });
+  const link = db.prepare('SELECT * FROM prov_links WHERE patientId=? AND providerId=?').get(req.params.id, v.providerId) as any;
+  if (!link) return res.status(400).json({ error: 'Link this provider to the patient first (Treating Providers tab)' });
+  if (!v.dos) return res.status(400).json({ error: 'Date of service required' });
+  if (!billFile) return res.status(400).json({ error: 'Attach the bill document' });
+  const billed = Number(v.billed);
+  if (!(billed > 0)) return res.status(400).json({ error: 'Billed amount required' });
+
+  const mode = v.mode === 'invoice' ? 'invoice' : 'itemized';
+  let items: any[] = [];
+  if (mode === 'itemized') {
+    try { items = JSON.parse(v.items || '[]'); } catch { /* handled below */ }
+    items = (Array.isArray(items) ? items : []).filter(x => String(x.cpt || '').trim());
+    if (!items.length) return res.status(400).json({ error: 'Itemized bills need at least one CPT line (or switch to General invoice)' });
+    const sum = items.reduce((s, x) => s + (Number(x.charge) || 0) * (Number(x.units) || 1), 0);
+    if (Math.abs(sum - billed) > 0.01)
+      return res.status(400).json({ error: `CPT lines total ${fmt$(sum)} but the billed amount is ${fmt$(billed)} — they must match exactly` });
+  } else if (!String(v.descr || '').trim()) {
+    return res.status(400).json({ error: 'General invoices need a description' });
+  }
+
+  const store = (f: Express.Multer.File) => {
+    db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
+      .run(f.filename, f.originalname, f.mimetype, f.size, req.user!.name, nowMST());
+    return f.filename;
+  };
+  const bfid = store(billFile);
+  const nfid = noteFile ? store(noteFile) : null;
+  // Payout is ALWAYS computed from contracted terms — never entered by hand here.
+  const pRow = db.prepare('SELECT insurerId FROM patients WHERE id=?').get(req.params.id) as any;
+  const eco = computeBillEconomics(pRow?.insurerId || null, v.providerId, link.branch, items, billed, v.dos || null);
+  const bid = 'b' + Date.now() + Math.floor(Math.random() * 1000);
+  db.prepare(`INSERT INTO bills(id,patientId,providerId,dos,billed,rate,revenue,descr,hasBill,hasNote,billFileId,billFileName,noteFileId,noteFileName)
+    VALUES(?,?,?,?,?,?,?,?,1,?,?,?,?,?)`)
+    .run(bid, req.params.id, v.providerId, v.dos, billed, eco.payout || 0, eco.revenue, v.descr || null,
+      nfid ? 1 : 0, bfid, billFile.originalname, nfid, noteFile?.originalname || null);
+  for (const x of items)
+    db.prepare('INSERT INTO bill_items(billId,cpt,icd,units,charge,modifier) VALUES(?,?,?,?,?,?)')
+      .run(bid, String(x.cpt).trim(), x.icd || null, Number(x.units) || 1, Number(x.charge) || 0, x.modifier || null);
+  db.prepare('UPDATE prov_links SET billed=billed+? WHERE patientId=? AND providerId=?').run(billed, req.params.id, v.providerId);
+  addNote(req.params.id, `${mode === 'invoice' ? 'Invoice' : 'Bill'} added: ${pr.name} · DOS ${fmtDate(v.dos)} · ${fmt$(billed)}${mode === 'invoice' ? ` — ${v.descr}` : ` · ${items.length} CPT line${items.length === 1 ? '' : 's'}`}${nfid ? '' : ' — visit note still needed to unlock payment'}`, req.user!.name);
+  audit(req.user!, 'bill.create2', 'bill', bid, `${mode} ${billed}`);
+  sendPatient(req, res, req.params.id);
+});
+
+/* ================= per-case financials — ADMIN ONLY (the margins tab) ================= */
+api.get('/patients/:id/financials', requireAdmin, (req, res) => {
+  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(req.params.id) as any;
+  if (!p) return res.status(404).json({ error: 'Not found' });
+  const zip = (String(p.address || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
+  const bills = db.prepare('SELECT * FROM bills WHERE patientId=? AND voided=0').all(p.id) as any[];
+  const byProv = new Map<string, any[]>();
+  for (const b of bills) (byProv.get(b.providerId) || byProv.set(b.providerId, []).get(b.providerId)!).push(b);
+  const providers = [...byProv.entries()].map(([pid, bs]) => {
+    const pr = db.prepare('SELECT name, type FROM providers WHERE id=?').get(pid) as any;
+    const billedTotal = bs.reduce((s, b) => s + b.billed, 0);
+    const payoutTotal = bs.reduce((s, b) => s + (b.rate || 0), 0);
+    const payoutPaid = bs.filter(b => b.status === 'paid').reduce((s, b) => s + (b.rate || 0), 0);
+    const revenueTotal = bs.reduce((s, b) => s + (b.revenue || 0), 0);
+    // Medicare comparison: sum current Medicare-allowed for every CPT line at the patient's ZIP
+    let medicareTotal = 0, medicareLines = 0, totalLines = 0;
+    for (const b of bs) {
+      for (const it of db.prepare('SELECT * FROM bill_items WHERE billId=?').all(b.id) as any[]) {
+        totalLines++;
+        const m = it.cpt ? medicareFor(zip, it.cpt) : null;
+        if (m != null) { medicareTotal += m * (Number(it.units) || 1); medicareLines++; }
+      }
+    }
+    return {
+      providerId: pid, name: pr?.name || pid, type: pr?.type || null, bills: bs.length,
+      billedTotal, payoutTotal, payoutPaid,
+      payoutPctOfBilled: billedTotal ? Math.round(payoutTotal / billedTotal * 1000) / 10 : null,
+      revenueTotal,
+      carrierPctOfBilled: billedTotal && revenueTotal ? Math.round(revenueTotal / billedTotal * 1000) / 10 : null,
+      medicareTotal: medicareLines ? Math.round(medicareTotal * 100) / 100 : null,
+      medicareMultiple: medicareLines && medicareTotal > 0 ? Math.round(payoutTotal / medicareTotal * 100) / 100 : null,
+      medicareCoverage: totalLines ? `${medicareLines}/${totalLines} CPT lines benchmarked` : 'no CPT lines entered',
+      marginProjected: Math.round(((bs.reduce((s, b) => s + (b.revenue || b.billed), 0)) - payoutTotal) * 100) / 100,
+    };
+  });
+  const received = (db.prepare("SELECT COALESCE(SUM(amount),0) s FROM receipts WHERE patientId=? AND status='Cleared' AND voided=0").get(p.id) as any).s;
+  const pendingIn = (db.prepare("SELECT COALESCE(SUM(amount),0) s FROM receipts WHERE patientId=? AND status!='Cleared' AND voided=0").get(p.id) as any).s;
+  const payoutPaid = bills.filter(b => b.status === 'paid').reduce((s, b) => s + (b.rate || 0), 0);
+  const payoutProjected = bills.reduce((s, b) => s + (b.rate || 0), 0);
+  const revenueProjected = bills.reduce((s, b) => s + (b.revenue || b.billed), 0);
+  const billedTotal = bills.reduce((s, b) => s + b.billed, 0);
+  res.json({
+    zip: zip || null, providers,
+    case: {
+      billedTotal, received, pendingIn, payoutPaid, payoutProjected, revenueProjected,
+      marginRealized: Math.round((received - payoutPaid) * 100) / 100,
+      marginProjected: Math.round((revenueProjected - payoutProjected) * 100) / 100,
+      marginRealizedPct: received ? Math.round((received - payoutPaid) / received * 100) : null,
+      marginProjectedPct: revenueProjected ? Math.round((revenueProjected - payoutProjected) / revenueProjected * 100) : null,
+      carrierPctOfBilled: billedTotal ? Math.round(revenueProjected / billedTotal * 1000) / 10 : null,
+    },
+  });
+});
+
+/* ================= geocoding & drive time (OpenStreetMap / OSRM, cached) ================= */
+const GEO_UA = { 'User-Agent': 'TrilogyPlatform/1.0 (internal provider map; trilogyconnections.com)' };
+api.get('/geo/code', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'q required' });
+  const key = q.toLowerCase();
+  const hit = db.prepare('SELECT lat, lon FROM geo_cache WHERE k=?').get(key) as any;
+  if (hit) return res.json({ lat: hit.lat, lon: hit.lon, cached: true });
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=${encodeURIComponent(q)}`, { headers: GEO_UA });
+    const d: any = await r.json();
+    if (!Array.isArray(d) || !d[0]) return res.status(404).json({ error: 'Address not found' });
+    const lat = parseFloat(d[0].lat), lon = parseFloat(d[0].lon);
+    db.prepare('INSERT OR REPLACE INTO geo_cache(k,lat,lon,at) VALUES(?,?,?,?)').run(key, lat, lon, nowMST());
+    res.json({ lat, lon });
+  } catch { res.status(502).json({ error: 'Geocoding service unreachable' }); }
+});
+api.get('/geo/route', async (req, res) => {
+  const { flat, flon, tlat, tlon } = req.query as any;
+  if (![flat, flon, tlat, tlon].every(x => Number.isFinite(parseFloat(x)))) return res.status(400).json({ error: 'flat/flon/tlat/tlon required' });
+  const key = [flat, flon, tlat, tlon].map(x => Number(x).toFixed(4)).join(',');
+  const hit = db.prepare('SELECT seconds, meters FROM route_cache WHERE k=?').get(key) as any;
+  if (hit) return res.json({ seconds: hit.seconds, meters: hit.meters, cached: true });
+  try {
+    const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${flon},${flat};${tlon},${tlat}?overview=false`, { headers: GEO_UA });
+    const d: any = await r.json();
+    const route = d?.routes?.[0];
+    if (!route) return res.status(404).json({ error: 'No route found' });
+    db.prepare('INSERT OR REPLACE INTO route_cache(k,seconds,meters,at) VALUES(?,?,?,?)').run(key, route.duration, route.distance, nowMST());
+    res.json({ seconds: route.duration, meters: route.distance });
+  } catch { res.status(502).json({ error: 'Routing service unreachable' }); }
+});
+
+/* ================= provider contracts: BAA + rate agreement gate ================= */
+api.post('/providers/:id/contract/:kind(baa|rate)', upload.single('file'), (req, res) => {
+  const pr = db.prepare('SELECT * FROM providers WHERE id=?').get(req.params.id) as any;
+  if (!pr) return res.status(404).json({ error: 'Not found' });
+  const kind = req.params.kind;
+  const fileCol = kind === 'baa' ? 'baaFileId' : 'rateAgreementFileId';
+  const signCol = kind === 'baa' ? 'baaSignedAt' : 'rateAgreementSignedAt';
+  if (req.file) {
+    db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
+      .run(req.file.filename, req.file.originalname, req.file.mimetype, req.file.size, req.user!.name, nowMST());
+    db.prepare(`UPDATE providers SET ${fileCol}=? WHERE id=?`).run(req.file.filename, pr.id);
+  }
+  if (req.body?.signed === '1' || req.body?.signed === 1 || req.body?.signed === true) {
+    db.prepare(`UPDATE providers SET ${signCol}=? WHERE id=?`).run(`Signed · ${nowMST()} · recorded by ${req.user!.name}`, pr.id);
+  }
+  const after = db.prepare('SELECT baaSignedAt, rateAgreementSignedAt, status FROM providers WHERE id=?').get(pr.id) as any;
+  // Both signed → the provider becomes Under contract (this is the only path to that status).
+  if (after.baaSignedAt && after.rateAgreementSignedAt) {
+    let st: string[] = []; try { st = JSON.parse(after.status || '[]'); } catch { /* reset */ }
+    if (!st.includes('Under contract')) {
+      st = st.filter(s => s !== 'Single case agreement'); st.push('Under contract');
+      db.prepare('UPDATE providers SET status=? WHERE id=?').run(JSON.stringify(st), pr.id);
+      audit(req.user!, 'provider.underContract', 'provider', pr.id, 'BAA + rate agreement both signed');
+    }
+  }
+  audit(req.user!, `provider.contract.${kind}`, 'provider', pr.id, req.file?.originalname || 'marked signed');
+  res.json(fullProvider(pr.id));
+});
+
+/* Admin-only provider business terms (contracted rate + contract files). */
+api.get('/providers/:id/admin', requireAdmin, (req, res) => {
+  const pr = db.prepare('SELECT id, name, contractedRate, baaFileId, baaSignedAt, rateAgreementFileId, rateAgreementSignedAt, orgType FROM providers WHERE id=?').get(req.params.id) as any;
+  if (!pr) return res.status(404).json({ error: 'Not found' });
+  res.json(pr);
+});
+api.post('/providers/:id/contracted-rate', requireAdmin, (req, res) => {
+  const pr = db.prepare('SELECT id, name FROM providers WHERE id=?').get(req.params.id) as any;
+  if (!pr) return res.status(404).json({ error: 'Not found' });
+  db.prepare('UPDATE providers SET contractedRate=? WHERE id=?').run(String(req.body?.rate || '').trim() || null, pr.id);
+  audit(req.user!, 'provider.contractedRate', 'provider', pr.id);
+  res.json({ ok: true });
+});
+
+/* ================= insurer contracts: master vs per-adjuster, admin-only rates ================= */
+api.patch('/ins-contracts/:cid', (req, res) => {
+  const c = db.prepare('SELECT * FROM ins_contracts WHERE id=?').get(req.params.cid) as any;
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  const v = req.body || {};
+  if (v.status) db.prepare('UPDATE ins_contracts SET status=? WHERE id=?').run(String(v.status), c.id);
+  if ('rate' in v) {
+    if (req.user!.role !== 'admin') return res.status(403).json({ error: 'Contract rates are admin-only' });
+    db.prepare('UPDATE ins_contracts SET rate=? WHERE id=?').run(v.rate === '' || v.rate == null ? null : Number(v.rate), c.id);
+  }
+  audit(req.user!, 'insContract.update', 'insurer', c.insurerId, `${c.name}: ${v.status || ''}${'rate' in v ? ' rate set' : ''}`);
+  res.json({ ok: true });
+});
+api.get('/insurers/:id/contract-rates', requireAdmin, (req, res) =>
+  res.json(db.prepare('SELECT id, name, scope, adjusterId, rate FROM ins_contracts WHERE insurerId=?').all(req.params.id)));
+
+/* ================= admin: delete account (deactivate's permanent sibling) ================= */
+api.delete('/admin/users/:uid', requireAdmin, (req, res) => {
+  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.uid) as any;
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  if (u.id === req.user!.id) return res.status(400).json({ error: "You can't delete your own account" });
+  const assigned = (db.prepare('SELECT COUNT(*) c FROM patients WHERE coordinator=? AND stage<4').get(u.id) as any).c;
+  if (assigned) return res.status(400).json({ error: `${u.name} is the coordinator on ${assigned} active case${assigned === 1 ? '' : 's'} — reassign them first, then delete` });
+  db.prepare('UPDATE patients SET coordinator=NULL WHERE coordinator=?').run(u.id);
+  db.prepare('DELETE FROM widget_prefs WHERE userId=?').run(u.id);
+  db.prepare('DELETE FROM users WHERE id=?').run(u.id);
+  audit(req.user!, 'admin.user.delete', 'user', u.id, `${u.name} <${u.email}> permanently deleted`);
+  res.json({ ok: true });
 });
 
 /* ================= admin: audit & data ================= */

@@ -110,6 +110,12 @@ export function seedIfEmpty(withDemo = true) {
     JSON.stringify(['Consult required before surgery auth']));
   insBr.run('MD-2030', 'Happy Valley', '9300 SE 91st Ave, Happy Valley, OR 97086', '(503) 555-0201', 'office@cascadeortho.com', 'Dr. R. Imani', '62% of billed', 'Under contract', 'Signed lien agreement.pdf', 0);
 
+  // Contracted demo providers carry signed BAA + rate agreements (the Under-contract gate);
+  // MD-2015 stays single-case on purpose — the one-time-agreement flows exercise it.
+  for (const pid of ['MD-2007', 'MD-2021', 'MD-2030'])
+    db.prepare('UPDATE providers SET baaSignedAt=?, rateAgreementSignedAt=? WHERE id=?')
+      .run('Signed (demo) · 06/2026', 'Signed (demo) · 06/2026', pid);
+
   const insPt = db.prepare(`INSERT INTO patients(id,name,caseType,phone,email,address,dob,doi,state,insurerId,claimNumber,policyNumber,adjusterId,coordinator,companionId,stage,accident,uwStatus,uwCoverage,uwLimit,uwRiskFlags,uwApprovedBy)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 
@@ -158,9 +164,9 @@ export function seedIfEmpty(withDemo = true) {
   insSD.run('PT-10042', "Add'l Authorization Request Form", 'Summit Spine (corporate)', '07/12/2026, 2:45 PM MST', 'Sent', 'Email');
 
   const insDoc = db.prepare('INSERT INTO documents(patientId,name,cat,meta) VALUES(?,?,?,?)');
-  insDoc.run('PT-10042', 'Police report — 26-114532.pdf', 'Misc', '06/05/2026, 11:20 AM MST · Donny C.');
+  insDoc.run('PT-10042', 'Police report — 26-114532.pdf', 'Other', '06/05/2026, 11:20 AM MST · Donny C.');
   insDoc.run('PT-10042', 'Signed Medical Bill Pay Agreement.pdf', 'Contract', '06/12/2026, 10:22 AM MST');
-  insDoc.run('PT-10042', 'Vehicle damage photos (4).zip', 'Misc', '06/05/2026, 11:24 AM MST');
+  insDoc.run('PT-10042', 'Vehicle damage photos (4).zip', 'Other', '06/05/2026, 11:24 AM MST');
   insDoc.run('PT-10042', 'PIP application — Pacific Mutual.pdf', 'Insurance', '06/08/2026, 3:44 PM MST');
 
   const insTask = db.prepare('INSERT INTO tasks(id,patientId,title,due,created,by) VALUES(?,?,?,?,?,?)');

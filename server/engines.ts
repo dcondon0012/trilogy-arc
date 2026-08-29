@@ -55,15 +55,16 @@ export function billChecks(bill: any): { checks: Check[]; verdict: 'green' | 'ex
   } else {
     checks.push({ key: 'rate', label: 'Rate vs contract', status: 'warn', detail: 'No contracted price on file for these codes — human eyes' });
   }
-  // ④ agreement on file (network contract or signed one-time agreement)
+  // ④ agreement on file — a provider is contracted only when BOTH the BAA and the
+  //    contracted-rate agreement are signed (pre-gate providers were grandfathered),
+  //    otherwise a signed one-time agreement covers this case.
   const pr = db.prepare('SELECT * FROM providers WHERE id=?').get(bill.providerId) as any;
-  const branches = db.prepare('SELECT * FROM branches WHERE providerId=?').all(bill.providerId) as any[];
-  const contracted = branches.some(b => b.status === 'Under contract' || b.contract) || J(pr?.status).includes('Under contract');
+  const contracted = !!(pr?.baaSignedAt && pr?.rateAgreementSignedAt);
   const ota = db.prepare("SELECT 1 FROM agreements WHERE patientId=? AND (providerId=? OR providerName=?) AND status='signed'")
     .get(bill.patientId, bill.providerId, pr?.name || '') as any;
   checks.push({
     key: 'agreement', label: 'Agreement on file', status: contracted || ota ? 'pass' : 'fail',
-    detail: contracted ? 'Network contract' : ota ? 'Signed one-time agreement' : 'No contract or one-time agreement',
+    detail: contracted ? 'Network contract (BAA + rate agreement signed)' : ota ? 'Signed one-time agreement' : 'No BAA + rate agreement, and no one-time agreement',
     fix: contracted || ota ? undefined : { startAgreement: true },
   });
 

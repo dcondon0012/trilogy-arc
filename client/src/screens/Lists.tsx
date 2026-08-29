@@ -58,7 +58,7 @@ export function CasesPage() {
         catch (e: any) {
           if (e.status === 409 && e.data?.duplicates) {
             const list = e.data.duplicates.map((d: any) => `• ${d.name} (${d.id})`).join('\n');
-            if (!confirm(`⚠ Possible duplicate:\n\n${list}\n\nCreate anyway?`)) return;
+            if (!confirm(`Possible duplicate:\n\n${list}\n\nCreate anyway?`)) return;
             p = await api('POST', '/patients', { ...v, force: true });
           } else throw e;
         }
@@ -74,7 +74,7 @@ export function CasesPage() {
       </div>
       <div className="card">
         <div className="chead" style={{ gap: 8 }}>
-          <input placeholder="🔍 Name or ID…" value={q} onChange={e => setQ(e.target.value)} style={{ ...sel, width: 200 }} />
+          <input placeholder="⌕ Name or ID…" value={q} onChange={e => setQ(e.target.value)} style={{ ...sel, width: 200 }} />
           <select value={stage} onChange={e => setStage(e.target.value)} style={sel}>
             <option value="all">All stages</option>
             {STAGES.map((s, i) => <option key={s} value={String(i)}>{s}</option>)}
@@ -189,7 +189,7 @@ export function ProvidersPage() {
       </div>
       <div className="card">
         <div className="chead">
-          <input placeholder="🔍 Name, ID, or type…" value={q} onChange={e => setQ(e.target.value)} style={{ ...sel, width: 240 }} />
+          <input placeholder="⌕ Name, ID, or type…" value={q} onChange={e => setQ(e.target.value)} style={{ ...sel, width: 240 }} />
           <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>{provs.length} in network</span>
         </div>
         <div className="cbody">

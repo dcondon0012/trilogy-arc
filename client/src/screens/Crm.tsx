@@ -16,7 +16,7 @@ const stageBadge = (s: string) =>
   s === 'live' ? 'b-green' : s === 'signed' ? 'b-green' : s === 'dead' ? 'b-red'
     : s === 'identify' ? 'b-gray' : s === 'proposal' || s === 'meeting' ? 'b-amber' : 'b-blue';
 const kindBadge = (k: string) => (k === 'carrier' ? 'b-purple' : 'b-green');
-const ACT_ICON: Record<string, string> = { call: '☎', email: '✉', meeting: '🤝', note: '✎', stage: '⇗' };
+const ACT_ICON: Record<string, string> = { call: '✆', email: '✉', meeting: '◈', note: '✎', stage: '⇗' };
 
 export function CrmPage({ user }: { user: User }) {
   const [ws, setWs] = useState<any>(null);
@@ -174,7 +174,7 @@ function TargetsTable({ targets, onOpen }: { targets: any[]; onOpen: (id: number
   return (
     <div className="card">
       <div className="chead"><h3>All targets ({targets.length})</h3>
-        <input placeholder="🔍 Filter…" value={q} onChange={e => setQ(e.target.value)}
+        <input placeholder="⌕ Filter…" value={q} onChange={e => setQ(e.target.value)}
           style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '6px 10px', fontSize: 12.5, width: 220 }} /></div>
       <div className="cbody" style={{ overflowX: 'auto' }}>
         <table><tbody>
@@ -312,7 +312,7 @@ function ProspectTab({ onOpen, reloadWs }: { onOpen: (id: number) => void; reloa
     <div className="grid2">
       <div className="card">
         <div className="chead"><h3>Bring in candidates</h3>
-          <button className="btn sm" disabled title="Auto-search needs the Google Places integration — parked until API accounts exist">🔍 Find providers (soon)</button>
+          <button className="btn sm" disabled title="Auto-search needs the Google Places integration — parked until API accounts exist">⌕ Find providers (soon)</button>
         </div>
         <div className="cbody">
           <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
@@ -441,7 +441,7 @@ function CobrandTab({ targets }: { targets: any[] }) {
         <div className="chead"><h3>Compose</h3></div>
         <div className="cbody">
           <div className="badge b-amber" style={{ display: 'inline-flex', padding: '6px 10px', marginBottom: 10 }}>
-            ⚠ DRAFT watermarked — external messaging isn't legally cleared yet; the watermark comes off when it is.</div>
+            DRAFT watermarked — external messaging isn't legally cleared yet; the watermark comes off when it is.</div>
           <div style={{ display: 'grid', gap: 8 }}>
             <select value={pick} onChange={e => setPick(e.target.value)} style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', fontSize: 13 }}>
               <option value="">Build for… (pick a provider target)</option>
@@ -462,8 +462,8 @@ function CobrandTab({ targets }: { targets: any[] }) {
               Accent color (theirs, if they have one) <input type="color" value={accent} onChange={e => setAccent(e.target.value)} /></label>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <button className="btn primary sm" onClick={openPrint}>🖨 Open & print to PDF</button>
-            <button className="btn sm" onClick={download}>⬇ Download HTML</button>
+            <button className="btn primary sm" onClick={openPrint}>Open & print to PDF</button>
+            <button className="btn sm" onClick={download}>↓ Download HTML</button>
             <button className="btn sm" onClick={logIt} disabled={!t}>✎ Log on the target</button>
           </div>
           <div style={{ fontSize: 11.5, color: 'var(--ink-mute)', marginTop: 10, lineHeight: 1.6 }}>
@@ -574,7 +574,7 @@ function TargetDetail({ id, user, onBack }: { id: number; user: User; onBack: ()
     <div>
       <span className="backlink" onClick={onBack}>← Back to CRM</span>
       <div className="pt-head">
-        <div className="pt-id" style={{ background: 'var(--slate)' }}>{t.kind === 'carrier' ? '🛡' : '⚕'}</div>
+        <div className="pt-id" style={{ background: 'var(--slate)' }}>{t.kind === 'carrier' ? '⬡' : '✚'}</div>
         <div className="pt-title" style={{ flex: 1 }}>
           <h2>{t.name}</h2>
           <div className="pt-meta">
@@ -585,9 +585,9 @@ function TargetDetail({ id, user, onBack }: { id: number; user: User; onBack: ()
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <button className="btn sm" onClick={() => logTouch('call')}>☎ Log call</button>
+          <button className="btn sm" onClick={() => logTouch('call')}>✆ Log call</button>
           <button className="btn sm" onClick={() => logTouch('email')}>✉ Log email</button>
-          <button className="btn sm" onClick={() => logTouch('meeting')}>🤝 Log meeting</button>
+          <button className="btn sm" onClick={() => logTouch('meeting')}>◈ Log meeting</button>
           <button className="btn sm" onClick={() => logTouch('note')}>✎ Note</button>
           <button className="btn sm" onClick={edit}>Edit</button>
         </div>

@@ -314,6 +314,40 @@ if (!db.prepare("SELECT 1 FROM counters WHERE k='mig_crm_campaigns'").get()) {
   db.prepare("INSERT INTO counters(k,v) VALUES('mig_crm_campaigns',1)").run();
 }
 
+/* ---------- 08/27 change set: auth docs, carrier authorization, contracts, margins ---------- */
+migrate('ALTER TABLE patients ADD COLUMN carrierAuthorized REAL DEFAULT 0');
+migrate('ALTER TABLE sent_docs ADD COLUMN meta TEXT');                       // JSON: auth amount, provider, kind — feeds the printable doc
+migrate('ALTER TABLE bills ADD COLUMN descr TEXT');                          // general-invoice description
+migrate("ALTER TABLE ins_contracts ADD COLUMN scope TEXT DEFAULT 'carrier'"); // 'carrier' (master) | 'adjuster'
+migrate('ALTER TABLE ins_contracts ADD COLUMN adjusterId TEXT');
+migrate('ALTER TABLE ins_contracts ADD COLUMN rate REAL');                   // % of billed the carrier pays us — ADMIN-ONLY, stripped from staff payloads
+migrate('ALTER TABLE providers ADD COLUMN baaFileId TEXT');
+migrate('ALTER TABLE providers ADD COLUMN baaSignedAt TEXT');
+migrate('ALTER TABLE providers ADD COLUMN rateAgreementFileId TEXT');
+migrate('ALTER TABLE providers ADD COLUMN rateAgreementSignedAt TEXT');
+migrate('ALTER TABLE providers ADD COLUMN contractedRate TEXT');             // ADMIN-ONLY, stripped from staff payloads
+migrate("ALTER TABLE providers ADD COLUMN orgType TEXT DEFAULT 'corporate'"); // 'corporate' (branches under one agreement) | 'independent'
+db.exec(`CREATE TABLE IF NOT EXISTS geo_cache(k TEXT PRIMARY KEY, lat REAL, lon REAL, at TEXT)`);
+db.exec(`CREATE TABLE IF NOT EXISTS route_cache(k TEXT PRIMARY KEY, seconds REAL, meters REAL, at TEXT)`);
+// One-time: rename the Misc document category to Other.
+if (!db.prepare("SELECT 1 FROM counters WHERE k='mig_docs_other'").get()) {
+  db.prepare("UPDATE documents SET cat='Other' WHERE cat='Misc'").run();
+  db.prepare("INSERT INTO counters(k,v) VALUES('mig_docs_other',1)").run();
+}
+// One-time: providers already operating as contracted predate the BAA + rate-agreement
+// gate — grandfather them so live cases keep working; new providers must sign both.
+if (!db.prepare("SELECT 1 FROM counters WHERE k='mig_contract_backfill'").get()) {
+  for (const pr of db.prepare('SELECT * FROM providers').all() as any[]) {
+    const legacy = String(pr.status || '').includes('Under contract')
+      || (db.prepare("SELECT 1 FROM branches WHERE providerId=? AND (status IN ('Under contract','Preferred') OR contract IS NOT NULL)").get(pr.id));
+    if (legacy) {
+      if (!pr.baaSignedAt) db.prepare('UPDATE providers SET baaSignedAt=? WHERE id=?').run('Grandfathered pre-gate · 08/27/2026', pr.id);
+      if (!pr.rateAgreementSignedAt) db.prepare('UPDATE providers SET rateAgreementSignedAt=? WHERE id=?').run('Grandfathered pre-gate · 08/27/2026', pr.id);
+    }
+  }
+  db.prepare("INSERT INTO counters(k,v) VALUES('mig_contract_backfill',1)").run();
+}
+
 db.exec(`CREATE TABLE IF NOT EXISTS fee_meta(k TEXT PRIMARY KEY, v TEXT)`);
 db.exec(`CREATE TABLE IF NOT EXISTS fee_codes(
   cpt TEXT PRIMARY KEY, category TEXT, description TEXT, notes TEXT,
@@ -385,7 +419,8 @@ export function fullInsurer(id: string) {
   if (!c) return null;
   c.states = J(c.states); c.rules = J(c.rules);
   c.adjusters = db.prepare('SELECT * FROM adjusters WHERE insurerId=?').all(id);
-  c.contracts = db.prepare('SELECT * FROM ins_contracts WHERE insurerId=?').all(id);
+  // rate deliberately excluded — contract rates are admin-only (fetched via /insurers/:id/contract-rates)
+  c.contracts = db.prepare('SELECT id,insurerId,name,meta,status,scope,adjusterId FROM ins_contracts WHERE insurerId=?').all(id);
   return c;
 }
 
@@ -394,6 +429,8 @@ export function fullProvider(id: string) {
   if (!p) return null;
   p.status = J(p.status); p.rules = J(p.rules);
   p.branches = db.prepare('SELECT * FROM branches WHERE providerId=?').all(id);
+  p.underContract = !!(p.baaSignedAt && p.rateAgreementSignedAt);
+  delete p.contractedRate;   // admin-only — never in the general staff payload
   return p;
 }
 

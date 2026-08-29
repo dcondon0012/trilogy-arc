@@ -69,7 +69,7 @@ export function AdminScreen() {
 
       {tab === 'users' && users.some(u => u.approved === 0) && (
         <div className="card" style={{ marginBottom: 16, borderColor: 'var(--amber)' }}>
-          <div className="chead"><h3>⏳ Portal access requests awaiting approval</h3></div>
+          <div className="chead"><h3>Portal access requests awaiting approval</h3></div>
           <div className="cbody">
             <table><tbody>
               <tr><th>Name</th><th>Email</th><th>Type</th><th>Organization</th><th></th></tr>
@@ -93,7 +93,7 @@ export function AdminScreen() {
         <div className="card">
           <div className="chead"><h3>All accounts (staff + portal)</h3>
             <div style={{ display: 'flex', gap: 8 }}>
-              <input placeholder="🔍 Search name, email, org…" value={userQ} onChange={e => setUserQ(e.target.value)}
+              <input placeholder="⌕ Search name, email, org…" value={userQ} onChange={e => setUserQ(e.target.value)}
                 style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '6px 10px', fontSize: 12.5, width: 230 }} />
               <button className="btn sm primary" onClick={addUser}>＋ Add user</button>
             </div></div>
@@ -139,7 +139,11 @@ export function AdminScreen() {
                     {u.id !== boot.user.id && (u.active
                       ? <button className="btn sm" style={{ color: 'var(--red)' }}
                           onClick={() => confirm(`Deactivate ${u.name}? They'll be signed out and unable to log in.`) && act(() => api('PATCH', `/admin/users/${u.id}`, { active: 0 }))}>Deactivate</button>
-                      : <button className="btn sm" onClick={() => act(() => api('PATCH', `/admin/users/${u.id}`, { active: 1 }))}>Reactivate</button>)}
+                      : <button className="btn sm" onClick={() => act(() => api('PATCH', `/admin/users/${u.id}`, { active: 1 }))}>Reactivate</button>)}{' '}
+                    {u.id !== boot.user.id && <button className="btn sm" style={{ color: 'var(--red)' }}
+                      onClick={() => confirm(`PERMANENTLY delete ${u.name}'s account? This cannot be undone (their audit history is kept). Prefer Deactivate unless you're sure.`)
+                        && confirm('Really delete? Active-case coordinators must be reassigned first.')
+                        && act(() => api('DELETE', `/admin/users/${u.id}`))}>Delete</button>}
                   </td>
                 </tr>))}
             </tbody></table>
@@ -152,7 +156,7 @@ export function AdminScreen() {
       {tab === 'audit' && (
         <div className="card">
           <div className="chead"><h3>Audit log — last 500 actions</h3>
-            <input placeholder="🔍 Filter by user, action, patient…" value={filter} onChange={e => setFilter(e.target.value)}
+            <input placeholder="⌕ Filter by user, action, patient…" value={filter} onChange={e => setFilter(e.target.value)}
               style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '6px 10px', fontSize: 12.5, width: 260 }} /></div>
           <div className="cbody" style={{ maxHeight: 520, overflowY: 'auto' }}>
             <table><tbody>
@@ -185,7 +189,7 @@ export function AdminScreen() {
                   </>) : r.status === 'approved' ? <span className="badge b-green">✓ Approved</span> : <span className="badge b-red">Denied</span>}</span>
                 </div>
               </div>))}
-            {!ai.length && <div style={{ color: 'var(--muted)' }}>No requests yet. The team submits these from the ✨ button, bottom-right of any page.</div>}
+            {!ai.length && <div style={{ color: 'var(--muted)' }}>No requests yet. The team submits these from the AI button, bottom-right of any page.</div>}
           </div>
         </div>
       )}
@@ -197,7 +201,7 @@ export function AdminScreen() {
             <div className="cbody">
               <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 12 }}>
                 Downloads every record as JSON. The uploaded files live in <b>trilogy-app/data/uploads</b> — copy that folder along with the export for a complete backup.</p>
-              <button className="btn primary" onClick={() => window.open('/api/admin/export')}>⬇ Export full data backup</button>
+              <button className="btn primary" onClick={() => window.open('/api/admin/export')}>↓ Export full data backup</button>
             </div>
           </div>
           <div className="card">
@@ -210,7 +214,7 @@ export function AdminScreen() {
                   if (!confirm('Wipe ALL case data? This cannot be undone. (User accounts are kept.)')) return;
                   if (!confirm('Really sure? Export a backup first if there is any doubt.')) return;
                   await api('POST', '/admin/wipe-demo'); await refresh(); go({ screen: 'home' });
-                }}>🗑 Wipe all case data</button>
+                }}>Wipe all case data</button>
             </div>
           </div>
         </div>
