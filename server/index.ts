@@ -6,7 +6,8 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { db, DATA_DIR } from './db.js';
 import { seedIfEmpty, ensureCoreUsers, flagSeedPasswords } from './seed.js';
-import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal } from './auth.js';
+import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal, forgotPassword, resetPassword } from './auth.js';
+import { scheduleCheckins } from './integrations.js';
 import { api } from './routes.js';
 import { portal } from './portal.js';
 import { fees, seedFeeCodes, scheduleFeeRefresh } from './fees.js';
@@ -78,6 +79,8 @@ app.post('/api/auth/login', login);
 app.post('/api/auth/mfa', mfa);
 app.post('/api/auth/logout', requireAuth, logout);
 app.post('/api/auth/change-password', requireAuth, changePassword);
+app.post('/api/auth/forgot-password', forgotPassword);   // pre-auth by design: emails a 30-min reset link, never reveals whether the address exists
+app.post('/api/auth/reset-password', resetPassword);
 app.get('/api/auth/me', (req, res) => {
   const u = currentUser(req);
   if (!u) return res.status(401).json({ error: 'Not signed in' });
@@ -138,6 +141,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 });
 
 scheduleFeeRefresh();
+scheduleCheckins();   // post-appointment SMS check-ins (queues to outbox until Twilio creds are on file)
 
 app.listen(PORT, () => {
   console.log(`Trilogy Platform API on http://localhost:${PORT} (build ${BUILD})`);

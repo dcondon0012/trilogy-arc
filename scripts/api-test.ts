@@ -894,6 +894,88 @@ async function main() {
   r = await call('GET', '/api/fees/lookup?zip=75201');
   assert(r.status === 200 && r.data.rates.length > 0, 'granted coordinator can use the fee tool');
 
+  /* ================= integrations layer (Phase A — no credentials) ================= */
+  // coordinator cannot touch the integrations panel
+  r = await call('GET', '/api/admin/integrations');
+  assert(r.status === 403, 'coordinator blocked from integrations panel');
+
+  cookies = [];
+  r = await call('POST', '/api/auth/login', { email: 'donny@trilogymed.com', password: 'admin123' });
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(secret) });
+  assert(r.status === 200, 'admin re-login for integrations');
+
+  // status: all services listed, none live without credentials
+  r = await call('GET', '/api/admin/integrations');
+  assert(r.status === 200 && r.data.services.length >= 5 && r.data.services.every((s: any) => !s.live), 'integration status: services listed, none live yet');
+  assert(r.data.secrets.every((s: any) => !s.masked || s.masked.includes('••') || s.masked.includes('(set')), 'secrets never returned in full');
+
+  // secrets: unknown keys rejected, valid key saves and comes back masked
+  r = await call('POST', '/api/admin/secrets', { EVIL_KEY: 'x' });
+  assert(r.status === 400, 'unknown secret key rejected');
+  r = await call('POST', '/api/admin/secrets', { SES_FROM: 'notifications@trilogyconnections.com' });
+  const sesRow = r.data?.secrets?.find((s: any) => s.key === 'SES_FROM');
+  assert(r.status === 200 && sesRow?.set && !sesRow.masked.includes('notifications@trilogyconnections'), 'secret saved, masked on read');
+
+  // new user with no password → temp code generated; queued to outbox since email is dark
+  const uEmail = `test${Date.now()}@trilogyconnections.com`;
+  r = await call('POST', '/api/admin/users', { name: 'Temp Code Test', role: 'coordinator', email: uEmail });
+  assert(r.status === 200 && r.data.tempPassword && r.data.emailed === false, 'user without password → temp code returned (email not live)');
+  const tempUid = r.data.id;
+  r = await call('GET', '/api/admin/outbox');
+  assert(r.status === 200 && r.data.some((o: any) => o.toAddr === uEmail && o.status === 'queued'), 'temp-code email queued in outbox');
+
+  // OCR endpoint refuses politely without AWS keys
+  {
+    const fd = new FormData();
+    fd.append('file', new Blob([Buffer.from('%PDF-1.4 fake')], { type: 'application/pdf' }), 'bill.pdf');
+    r = await call('POST', '/api/bills/parse', undefined, fd);
+    assert(r.status === 503, 'bill OCR reports not-configured without AWS keys');
+  }
+
+  // self-serve password reset — same reply for unknown emails (no enumeration)
+  cookies = [];
+  r = await call('POST', '/api/auth/forgot-password', { email: 'nobody@nowhere.example' });
+  const genericMsg = r.data?.message;
+  assert(r.status === 200 && genericMsg, 'forgot-password: unknown email gets the same generic reply');
+  r = await call('POST', '/api/auth/forgot-password', { email: 'nicole@trilogymed.com' });
+  assert(r.status === 200 && r.data.message === genericMsg, 'forgot-password: real email gets the identical reply');
+
+  // pull the reset link out of the queued email (admin outbox), complete the reset
+  cookies = [];
+  r = await call('POST', '/api/auth/login', { email: 'donny@trilogymed.com', password: 'admin123' });
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(secret) });
+  r = await call('GET', '/api/admin/outbox');
+  const resetMail = r.data.find((o: any) => o.toAddr === 'nicole@trilogymed.com' && /reset=/.test(o.body));
+  const token = resetMail ? (resetMail.body.match(/reset=([0-9a-f]+)/) || [])[1] : null;
+  assert(!!token, 'reset link (with token) queued for the real account');
+
+  cookies = [];
+  r = await call('POST', '/api/auth/reset-password', { token: 'deadbeef', newPassword: 'whatever123' });
+  assert(r.status === 400, 'bogus reset token rejected');
+  r = await call('POST', '/api/auth/reset-password', { token, newPassword: 'brandnew123' });
+  assert(r.status === 200, 'valid reset token sets a new password');
+  r = await call('POST', '/api/auth/reset-password', { token, newPassword: 'again12345' });
+  assert(r.status === 400, 'reset token is single-use');
+  r = await call('POST', '/api/auth/login', { email: 'nicole@trilogymed.com', password: 'coord123' });
+  assert(r.status === 401, 'old password no longer works after reset');
+  r = await call('POST', '/api/auth/login', { email: 'nicole@trilogymed.com', password: 'brandnew123' });
+  assert(r.status === 200, 'new password works after reset');
+
+  // put nicole back to coord123 through the same flow (keeps reruns clean)
+  cookies = [];
+  await call('POST', '/api/auth/forgot-password', { email: 'nicole@trilogymed.com' });
+  cookies = [];
+  r = await call('POST', '/api/auth/login', { email: 'donny@trilogymed.com', password: 'admin123' });
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(secret) });
+  r = await call('GET', '/api/admin/outbox');
+  const t2 = (r.data.find((o: any) => o.toAddr === 'nicole@trilogymed.com' && /reset=/.test(o.body) && !o.body.includes(token!))?.body.match(/reset=([0-9a-f]+)/) || [])[1];
+  // clean up the temp test user while we're admin
+  r = await call('DELETE', `/api/admin/users/${tempUid}`);
+  assert(r.status === 200, 'temp test user deleted');
+  cookies = [];
+  r = await call('POST', '/api/auth/reset-password', { token: t2, newPassword: 'coord123' });
+  assert(r.status === 200, 'nicole restored to original password');
+
   console.log(failures ? `\n${failures} FAILURES` : '\nALL API TESTS PASSED');
   process.exit(failures ? 1 : 0);
 }

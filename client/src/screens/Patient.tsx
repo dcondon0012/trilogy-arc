@@ -513,6 +513,29 @@ function BillModal({ p, md, mut, onClose }: any) {
   const noteRef = useRef<HTMLInputElement>(null);
   const [billName, setBillName] = useState('');
   const [noteName, setNoteName] = useState('');
+  const [ocring, setOcring] = useState(false);
+
+  // OCR autofill: sends the attached bill to /bills/parse (Textract). Fills what it read;
+  // everything stays editable, and the CPT-lines-must-equal-billed check still applies.
+  const ocr = async () => {
+    const billFile = billRef.current?.files?.[0];
+    if (!billFile) return alert('Attach the bill document first — then I can read it');
+    const fd = new FormData();
+    fd.append('file', billFile);
+    setOcring(true);
+    try {
+      const res = await fetch('/api/bills/parse', { method: 'POST', body: fd, credentials: 'same-origin' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      if (data.dos) setDos(data.dos);
+      if (data.total) setBilled(String(data.total));
+      if (data.lines?.length) {
+        setMode('itemized');
+        setItems(data.lines.map((l: any) => ({ cpt: l.cpt || '', units: String(l.units || 1), charge: String(l.charge || '') })));
+      }
+      if (!data.dos && !data.total && !data.lines?.length) alert("Couldn't find a date, total, or line items on that document — enter them by hand");
+    } catch (e: any) { alert(e.message); } finally { setOcring(false); }
+  };
 
   const lineSum = items.reduce((s, x) => s + (parseFloat(x.charge) || 0) * (parseFloat(x.units) || 1), 0);
   const billedNum = parseFloat(billed) || 0;
@@ -594,7 +617,8 @@ function BillModal({ p, md, mut, onClose }: any) {
         </div>
         <div style={{ fontSize: 11.5, color: 'var(--ink-mute)', margin: '8px 0 4px' }}>
           Payout is calculated automatically from contracted terms — nothing to enter.{' '}
-          <button className="btn sm" disabled title="Bill OCR auto-fill arrives with the document-reading integration">Read from upload (soon)</button>
+          <button className="btn sm" disabled={ocring || !billName} title={billName ? 'Read DOS, total, and CPT lines off the attached bill' : 'Attach the bill document first'}
+            onClick={ocr}>{ocring ? 'Reading…' : 'Read from upload'}</button>
         </div>
         <div className="mactions">
           <button className="btn" onClick={onClose}>Cancel</button>

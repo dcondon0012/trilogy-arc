@@ -81,11 +81,14 @@ function BrandPanel() {
 }
 
 function Login({ onDone }: { onDone: () => void }) {
-  const [step, setStep] = useState<'creds' | 'enroll' | 'verify' | 'newpw'>('creds');
+  // A ?reset=<token> in the URL (from the reset email) lands straight on the set-new-password step.
+  const resetToken = new URLSearchParams(location.search).get('reset');
+  const [step, setStep] = useState<'creds' | 'enroll' | 'verify' | 'newpw' | 'forgot' | 'reset'>(resetToken ? 'reset' : 'creds');
   const [signup, setSignup] = useState(false);
   const [email, setEmail] = useState('');
   const [pw, setPw] = useState('');
   const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
   const [otpauthUrl, setOtpauthUrl] = useState('');
   const [secret, setSecret] = useState('');
   const [code, setCode] = useState('');
@@ -114,6 +117,20 @@ function Login({ onDone }: { onDone: () => void }) {
     try { await api('POST', '/auth/change-password', { currentPassword: pw, newPassword: newPw }); onDone(); }
     catch (e: any) { setErr(e.message); }
   };
+  const forgot = async () => {
+    setErr('');
+    try { const r = await api('POST', '/auth/forgot-password', { email }); setMsg(r.message); }
+    catch (e: any) { setErr(e.message); }
+  };
+  const doReset = async () => {
+    setErr('');
+    if (newPw !== newPw2) { setErr('Passwords do not match'); return; }
+    try {
+      const r = await api('POST', '/auth/reset-password', { token: resetToken, newPassword: newPw });
+      history.replaceState(null, '', '/');   // drop the token from the URL
+      setMsg(r.message); setNewPw(''); setNewPw2(''); setStep('creds');
+    } catch (e: any) { setErr(e.message); }
+  };
 
   if (signup) return <Signup onBack={() => setSignup(false)} />;
   return (
@@ -123,6 +140,7 @@ function Login({ onDone }: { onDone: () => void }) {
         <TrilogyLogo size={26} />
         <p className="sub">Sign in to the platform.</p>
         {err && <div className="loginerr">{err}</div>}
+        {msg && step === 'creds' && <div className="badge b-green" style={{ display: 'flex', padding: 12, marginBottom: 10 }}>{msg}</div>}
         {step === 'creds' && (<>
           <div className="field"><label>Email</label>
             <input type="email" value={email} onChange={e => setEmail(e.target.value)} /></div>
@@ -132,8 +150,31 @@ function Login({ onDone }: { onDone: () => void }) {
           {location.hostname === 'localhost' && <div className="demobox"><b>Demo accounts</b><br />
             Admin: donny@trilogymed.com / admin123<br />
             Coordinator: nicole@trilogymed.com / coord123</div>}
+          <div className="secnote"><span className="link" onClick={() => { setMsg(''); setErr(''); setStep('forgot'); }}>Forgot your password?</span></div>
           <div className="secnote">Encrypted sessions · full audit log · MFA at launch</div>
           <div className="secnote">Provider or carrier? <span className="link" onClick={() => setSignup(true)}>Request portal access</span></div>
+        </>)}
+        {step === 'forgot' && (<>
+          {msg ? (<>
+            <div className="badge b-green" style={{ display: 'flex', padding: 12 }}>{msg}</div>
+            <button className="btn" style={{ width: '100%', justifyContent: 'center', marginTop: 14 }} onClick={() => { setMsg(''); setStep('creds'); }}>Back to sign in</button>
+          </>) : (<>
+            <p className="sub" style={{ margin: '10px 0' }}><b>Reset your password</b><br />
+              Enter your account email — we'll send a reset link that works for 30 minutes.</p>
+            <div className="field"><label>Email</label>
+              <input type="email" value={email} autoFocus onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === 'Enter' && forgot()} /></div>
+            <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: 12 }} onClick={forgot}>Send reset link</button>
+            <div className="secnote"><span className="link" onClick={() => setStep('creds')}>← Back to sign in</span></div>
+          </>)}
+        </>)}
+        {step === 'reset' && (<>
+          <p className="sub" style={{ margin: '10px 0' }}><b>Choose a new password</b> (8+ characters)</p>
+          <div className="field"><label>New password</label>
+            <input type="password" value={newPw} autoFocus onChange={e => setNewPw(e.target.value)} /></div>
+          <div className="field"><label>Confirm</label>
+            <input type="password" value={newPw2} onChange={e => setNewPw2(e.target.value)} onKeyDown={e => e.key === 'Enter' && doReset()} /></div>
+          <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: 12 }} onClick={doReset}>Set password</button>
+          <div className="secnote"><span className="link" onClick={() => { history.replaceState(null, '', '/'); setStep('creds'); }}>← Back to sign in</span></div>
         </>)}
         {step === 'enroll' && (<>
           <p className="sub" style={{ margin: '10px 0' }}><b>Set up MFA (one time)</b><br />

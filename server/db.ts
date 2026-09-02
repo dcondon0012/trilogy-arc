@@ -327,6 +327,20 @@ migrate('ALTER TABLE providers ADD COLUMN rateAgreementFileId TEXT');
 migrate('ALTER TABLE providers ADD COLUMN rateAgreementSignedAt TEXT');
 migrate('ALTER TABLE providers ADD COLUMN contractedRate TEXT');             // ADMIN-ONLY, stripped from staff payloads
 migrate("ALTER TABLE providers ADD COLUMN orgType TEXT DEFAULT 'corporate'"); // 'corporate' (branches under one agreement) | 'independent'
+/* ---------- integration layer (phase A: built dark, lights up with credentials) ---------- */
+db.exec(`CREATE TABLE IF NOT EXISTS secrets(k TEXT PRIMARY KEY, v TEXT, updatedAt TEXT, updatedBy TEXT)`);
+db.exec(`CREATE TABLE IF NOT EXISTS outbox(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'email' CHECK(kind IN ('email','sms','fax')),
+  toAddr TEXT NOT NULL, subject TEXT, body TEXT, patientId TEXT, meta TEXT,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','sent','failed')),
+  detail TEXT, createdAt TEXT NOT NULL, sentAt TEXT
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS pw_resets(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, userId TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tokenHash TEXT NOT NULL, expiresAt TEXT NOT NULL, usedAt TEXT
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, kind)`);
+
 db.exec(`CREATE TABLE IF NOT EXISTS geo_cache(k TEXT PRIMARY KEY, lat REAL, lon REAL, at TEXT)`);
 db.exec(`CREATE TABLE IF NOT EXISTS route_cache(k TEXT PRIMARY KEY, seconds REAL, meters REAL, at TEXT)`);
 // One-time: rename the Misc document category to Other.

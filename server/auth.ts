@@ -1,7 +1,9 @@
 import type { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 import { authenticator } from 'otplib';
 import { db, audit } from './db.js';
+import { sendMail } from './integrations.js';
 
 export interface SessionUser {
   id: string; name: string; email: string;
@@ -182,6 +184,51 @@ export function changePassword(req: Request, res: Response) {
   db.prepare('UPDATE users SET pwHash=?, mustChangePw=0 WHERE id=?').run(bcrypt.hashSync(pw, 10), u.id);
   audit(req.user!, 'password.change');
   res.json({ ok: true });
+}
+
+/* ── self-serve password reset (email-backed; queued until SES is live) ── */
+const sha = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
+const forgotHits = new Map<string, number[]>();
+
+export async function forgotPassword(req: Request, res: Response) {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const key = (req.ip || '?');
+  const now = Date.now();
+  const hits = (forgotHits.get(key) || []).filter(t => now - t < 15 * 60 * 1000);
+  hits.push(now); forgotHits.set(key, hits);
+  // Same response whether or not the account exists — no user enumeration; rate-limited per IP.
+  const done = () => res.json({ ok: true, message: 'If that email has an account, a reset link is on its way. It expires in 30 minutes.' });
+  if (hits.length > 5 || !email) return done();
+  const u = db.prepare('SELECT * FROM users WHERE lower(email)=? AND active=1 AND approved=1').get(email) as any;
+  if (!u) return done();
+  const token = crypto.randomBytes(32).toString('hex');
+  db.prepare('INSERT INTO pw_resets(userId,tokenHash,expiresAt) VALUES(?,?,?)')
+    .run(u.id, sha(token), new Date(now + 30 * 60 * 1000).toISOString());
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'trilogyconnections.com');
+  const proto = String(req.headers['x-forwarded-proto'] || 'https');
+  const link = `${proto}://${host}/?reset=${token}`;
+  audit({ id: u.id, name: u.name }, 'password.resetRequested');
+  await sendMail({
+    to: u.email, subject: 'Reset your Trilogy password',
+    text: `Hi ${u.name},\n\nSomeone (hopefully you) asked to reset your Trilogy password. Use this link within 30 minutes:\n\n${link}\n\nIf you didn't ask for this, you can ignore it — your password is unchanged.\n\n— Trilogy Medical Networks`,
+    meta: { kind: 'pw-reset', userId: u.id },
+  });
+  return done();
+}
+
+export function resetPassword(req: Request, res: Response) {
+  const token = String(req.body?.token || '');
+  const pw = String(req.body?.newPassword || '');
+  if (pw.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  const row = db.prepare('SELECT * FROM pw_resets WHERE tokenHash=?').get(sha(token)) as any;
+  if (!row || row.usedAt || new Date(row.expiresAt).getTime() < Date.now())
+    return res.status(400).json({ error: 'That reset link is invalid or expired — request a new one' });
+  const u = db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(row.userId) as any;
+  if (!u) return res.status(400).json({ error: 'That reset link is invalid or expired — request a new one' });
+  db.prepare('UPDATE users SET pwHash=?, mustChangePw=0 WHERE id=?').run(bcrypt.hashSync(pw, 10), u.id);
+  db.prepare('UPDATE pw_resets SET usedAt=? WHERE id=?').run(new Date().toISOString(), row.id);
+  audit({ id: u.id, name: u.name }, 'password.resetCompleted');
+  res.json({ ok: true, message: 'Password updated — sign in with it now.' });
 }
 
 export function logout(req: Request, res: Response) {

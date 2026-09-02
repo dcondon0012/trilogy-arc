@@ -9,7 +9,7 @@ interface AuditRow { id: number; time: string; userName: string; action: string;
 
 export function AdminScreen() {
   const { boot, go, refresh } = useApp();
-  const [tab, setTab] = useState<'users' | 'audit' | 'ai' | 'data'>('users');
+  const [tab, setTab] = useState<'users' | 'integrations' | 'audit' | 'ai' | 'data'>('users');
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [ai, setAi] = useState<AiRequest[]>([]);
@@ -39,9 +39,14 @@ export function AdminScreen() {
           { v: 'sales', l: 'Sales — CRM and Medicare fee tool only; no case data, financials, or admin tools' },
           { v: 'admin', l: 'Admin — everything, incl. financials, business stats, user management' }] },
         { key: 'email', label: 'Email*', type: 'email', full: true },
-        { key: 'password', label: 'Temporary password* (8+ chars — they should change it via you resetting after first login)', full: true },
+        { key: 'password', label: 'Temporary password (leave blank to auto-generate — emailed to them once email is live)', full: true },
       ]}
-      onSave={async v => { await act(() => api('POST', '/admin/users', v)); setModal(null); }} />);
+      onSave={async v => {
+        const r = await api('POST', '/admin/users', v);
+        await loadUsers(); await refresh(); setModal(null);
+        if (r.tempPassword) alert(`Account created. Email sending isn't live yet, so relay this one-time code yourself:\n\n${r.tempPassword}\n\nThey'll be required to set their own password at first login.`);
+        else if (r.emailed) alert('Account created — their temporary code was emailed to them.');
+      }} />);
 
   const resetPw = (u: AdminUser) => setModal(
     <FormModal title={'Reset password — ' + u.name} onClose={() => setModal(null)} saveLabel="Reset"
@@ -63,7 +68,7 @@ export function AdminScreen() {
       </div>
 
       <div className="tabs">
-        {([['users', 'Users & Permissions'], ['audit', 'Audit Log'], ['ai', 'AI Change Requests'], ['data', 'Data & Backups']] as const).map(([k, l]) => (
+        {([['users', 'Users & Permissions'], ['integrations', 'Integrations'], ['audit', 'Audit Log'], ['ai', 'AI Change Requests'], ['data', 'Data & Backups']] as const).map(([k, l]) => (
           <div key={k} className={'tab' + (tab === k ? ' active' : '')} onClick={() => setTab(k)}>{l}</div>))}
       </div>
 
@@ -153,6 +158,8 @@ export function AdminScreen() {
         </div>
       )}
 
+      {tab === 'integrations' && <IntegrationsTab />}
+
       {tab === 'audit' && (
         <div className="card">
           <div className="chead"><h3>Audit log — last 500 actions</h3>
@@ -220,6 +227,108 @@ export function AdminScreen() {
         </div>
       )}
       {modal}
+    </div>
+  );
+}
+
+/* ================= Integrations — the API layer's control panel ================= */
+interface IntService { key: string; name: string; live: boolean; queued?: number; needs: string; keys: string[]; unlocks: string; }
+interface IntSecret { key: string; set: boolean; masked: string; updatedAt: string | null; }
+interface OutboxRow { id: number; kind: string; toAddr: string | null; subject: string | null; body: string; patientId: string | null; status: string; detail: string | null; createdAt: string; sentAt: string | null; }
+
+function IntegrationsTab() {
+  const [services, setServices] = useState<IntService[]>([]);
+  const [secrets, setSecrets] = useState<IntSecret[]>([]);
+  const [outbox, setOutbox] = useState<OutboxRow[] | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);   // service key whose fields are open
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  const load = () => api('GET', '/admin/integrations').then(r => { setServices(r.services); setSecrets(r.secrets); });
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    const body = Object.fromEntries(Object.entries(vals).filter(([, v]) => v.trim()));
+    if (!Object.keys(body).length) { setEditing(null); return; }
+    setBusy(true);
+    try {
+      const r = await api('POST', '/admin/secrets', body);
+      setServices(r.services); setSecrets(r.secrets); setVals({}); setEditing(null);
+    } catch (e: any) { alert(e.message || 'Error'); } finally { setBusy(false); }
+  };
+
+  const secretFor = (k: string) => secrets.find(s => s.key === k);
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="chead"><h3>External services</h3></div>
+        <div className="cbody">
+          <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 12 }}>
+            Everything below is already wired into the app. A service that isn't live yet quietly queues its sends
+            (see the outbox at the bottom) — paste the credentials and the same actions start sending for real, no redeploy.
+            Keys are stored write-only: once saved you'll only ever see the last four characters.</p>
+          {services.map(s => (
+            <div key={s.key} style={{ border: '1px solid var(--line)', borderRadius: 10, padding: '12px 14px', marginBottom: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <b style={{ fontSize: 13.5 }}>{s.name}</b>
+                {s.live ? <span className="badge b-green">Live</span> : <span className="badge b-amber">Waiting on credentials</span>}
+                {!!s.queued && <span className="badge b-blue">{s.queued} queued</span>}
+                <span style={{ flex: 1 }} />
+                {s.keys.length > 0 && (
+                  <button className="btn sm" onClick={() => { setEditing(editing === s.key ? null : s.key); setVals({}); }}>
+                    {editing === s.key ? 'Close' : s.live ? 'Update keys' : 'Enter keys'}</button>)}
+              </div>
+              <div style={{ fontSize: 12.5, marginTop: 6 }}><b>Unlocks:</b> {s.unlocks}</div>
+              {!s.live && <div style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 4 }}><b>What Donny/Miles need to get:</b> {s.needs}</div>}
+              {editing === s.key && (
+                <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
+                  {s.keys.map(k => {
+                    const cur = secretFor(k);
+                    return (
+                      <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                        <code style={{ fontSize: 11.5, width: 200, flexShrink: 0 }}>{k}</code>
+                        <input type="password" placeholder={cur?.set ? `saved ${cur.masked} — paste to replace` : 'paste value'}
+                          value={vals[k] || ''} onChange={e => setVals(v => ({ ...v, [k]: e.target.value }))}
+                          autoComplete="off"
+                          style={{ flex: 1, border: '1px solid var(--line)', borderRadius: 8, padding: '6px 10px', fontSize: 12.5 }} />
+                        {cur?.set && <span className="badge b-green">set</span>}
+                      </div>);
+                  })}
+                  <button className="btn sm primary" disabled={busy} onClick={save}>Save keys</button>
+                  <span style={{ fontSize: 11.5, color: 'var(--muted)', marginLeft: 10 }}>Blank fields keep their saved value.</span>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="chead"><h3>Outbox — everything the app tried to send</h3>
+          <button className="btn sm" onClick={() => (outbox ? setOutbox(null) : api('GET', '/admin/outbox').then(setOutbox))}>
+            {outbox ? 'Hide' : 'Show last 200'}</button></div>
+        {outbox && (
+          <div className="cbody" style={{ maxHeight: 420, overflowY: 'auto' }}>
+            <table><tbody>
+              <tr><th>When</th><th>Kind</th><th>To</th><th>Subject / body</th><th>Status</th></tr>
+              {outbox.map(o => (
+                <tr key={o.id}>
+                  <td style={{ whiteSpace: 'nowrap' }}>{o.createdAt.replace('T', ' ').slice(0, 16)}</td>
+                  <td><span className="idchip">{o.kind}</span></td>
+                  <td>{o.toAddr || '—'}</td>
+                  <td style={{ maxWidth: 380 }}>{o.subject ? <b>{o.subject}</b> : null}<div style={{ fontSize: 11.5, color: 'var(--muted)', whiteSpace: 'pre-wrap' }}>{o.body.slice(0, 200)}{o.body.length > 200 ? '…' : ''}</div></td>
+                  <td>{o.status === 'sent' ? <span className="badge b-green">Sent</span>
+                    : o.status === 'failed' ? <span className="badge b-red" title={o.detail || ''}>Failed</span>
+                    : <span className="badge b-amber">Queued</span>}</td>
+                </tr>))}
+              {!outbox.length && <tr><td colSpan={5} style={{ color: 'var(--muted)' }}>Nothing yet — sends appear here the moment the app generates one.</td></tr>}
+            </tbody></table>
+            <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 8 }}>
+              Queued = waiting on credentials (copy the body and send it yourself if it can't wait). Failed = the service is live but the vendor rejected it — hover the badge for the reason.</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

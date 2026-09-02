@@ -14,6 +14,7 @@ import {
   driftReport, carrierTier, providerScore, carrierReport, outboundDrafts, normFor,
 } from './engines.js';
 import { medicareFor } from './fees.js';
+import { sendMail, integrationStatus, secretsMasked, setSecret, SECRET_KEYS, parseBillFile, ocrReady, emailReady } from './integrations.js';
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -1216,7 +1217,7 @@ api.post('/patients/:id/provlinks', (req, res) => {
   sendPatient(req, res, req.params.id);
 });
 
-api.post('/provlinks/:lid/action', (req, res) => {
+api.post('/provlinks/:lid/action', async (req, res) => {
   const l = db.prepare('SELECT * FROM prov_links WHERE id=?').get(req.params.lid) as any;
   if (!l) return res.status(404).json({ error: 'Not found' });
   const pr = db.prepare('SELECT name, corpEmail FROM providers WHERE id=?').get(l.providerId) as any;
@@ -1255,7 +1256,9 @@ api.post('/provlinks/:lid/action', (req, res) => {
   audit(req.user!, 'provlink.' + kind, 'patient', l.patientId, pr.name);
   const pt = db.prepare('SELECT name FROM patients WHERE id=?').get(l.patientId) as any;
   const docName = kind === 'auth' ? 'Authorization' : kind === 'addauth' ? "Add'l Authorization" : kind === 'reqform' ? "Add'l Authorization Request Form" : 'Cancellation of Authorization Form';
+  const emailed = sentId ? await emailSentDoc(l.patientId, sentId, pr.corpEmail || null) : false;
   sendPatient(req, res, l.patientId, sentId ? {
+    _emailed: emailed,
     _doc: {
       url: `/api/patients/${l.patientId}/sentdoc/${sentId}/print`,
       mailto: `mailto:${encodeURIComponent(pr.corpEmail || '')}`
@@ -1278,15 +1281,12 @@ api.patch('/provlinks/:lid', (req, res) => {
   sendPatient(req, res, l.patientId);
 });
 
-/* Printable document for any sent doc (authorizations and templated letters). */
-api.get('/patients/:id/sentdoc/:sid/print', (req, res) => {
-  const d = db.prepare('SELECT * FROM sent_docs WHERE id=? AND patientId=?').get(req.params.sid, req.params.id) as any;
-  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(req.params.id) as any;
-  if (!d || !p) return res.status(404).json({ error: 'Not found' });
+/* One renderer for sent docs: the print view AND the email body are the same document. */
+function renderSentDocHtml(p: any, d: any): string {
   let meta: any = {}; try { meta = JSON.parse(d.meta || '{}'); } catch { /* older rows */ }
   const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const row = (k: string, v: any) => v ? `<tr><td class="k">${k}</td><td>${esc(v)}</td></tr>` : '';
-  res.send(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(d.name)} — ${esc(p.name)}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(d.name)} — ${esc(p.name)}</title>
 <style>body{font:14px/1.6 Arial,Helvetica,sans-serif;color:#2A3346;max-width:720px;margin:0 auto;padding:48px 40px}
 h1{font-size:24px;color:#2D3647;margin:0 0 2px} .tri{color:#45A8EB}
 .sub{color:#5A6474;font-size:12.5px;margin-bottom:26px}
@@ -1312,8 +1312,34 @@ ${row('Case type', p.caseType === 'trilogy' ? 'Third-party bodily injury' : 'PIP
     : `This document accompanies the ${esc(d.name)} for the patient above, sent by Trilogy Medical Networks.`}</div>
 <div class="sig"><div>Trilogy Medical Networks — authorized signature</div><div>Provider acknowledgment — signature &amp; date</div></div>
 <button class="print" onclick="print()">Print / Save as PDF</button>
-</body></html>`);
+</body></html>`;
+}
+
+api.get('/patients/:id/sentdoc/:sid/print', (req, res) => {
+  const d = db.prepare('SELECT * FROM sent_docs WHERE id=? AND patientId=?').get(req.params.sid, req.params.id) as any;
+  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(req.params.id) as any;
+  if (!d || !p) return res.status(404).json({ error: 'Not found' });
+  res.send(renderSentDocHtml(p, d));
 });
+
+/** When email is live, a sent doc really goes out — document in the body and attached. */
+async function emailSentDoc(patientId: string, sid: number, toEmail: string | null): Promise<boolean> {
+  if (!toEmail || !emailReady()) return false;
+  const d = db.prepare('SELECT * FROM sent_docs WHERE id=?').get(sid) as any;
+  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(patientId) as any;
+  if (!d || !p) return false;
+  const html = renderSentDocHtml(p, d);
+  const r = await sendMail({
+    to: toEmail, subject: `${d.name} — ${p.name} (${p.id}) — Trilogy Medical Networks`,
+    html, attachments: [{ filename: `${d.name.replace(/[^A-Za-z0-9 ]/g, '')} - ${p.id}.html`, content: html, contentType: 'text/html' }],
+    patientId, meta: { kind: 'sentdoc', sid },
+  });
+  if (r.sent) {
+    db.prepare("UPDATE sent_docs SET method='Email (sent by Arc)' WHERE id=?").run(sid);
+    addNote(patientId, `Emailed "${d.name}" to ${toEmail} — document included and attached`, 'system');
+  }
+  return r.sent;
+}
 
 /* ---- bills / receipts / payments ---- */
 api.post('/patients/:id/bills', (req, res) => {
@@ -1727,14 +1753,27 @@ api.post('/admin/users', requireAdmin, async (req, res) => {
   const { name, email, role, password } = req.body || {};
   if (!String(name || '').trim() || !String(email || '').trim()) return res.status(400).json({ error: 'Name and email required' });
   if (!['admin', 'coordinator', 'sales'].includes(role)) return res.status(400).json({ error: 'Role must be admin, coordinator, or sales' });
-  if (String(password || '').length < 8) return res.status(400).json({ error: 'Temporary password must be at least 8 characters' });
+  if (password && String(password).length < 8) return res.status(400).json({ error: 'Temporary password must be at least 8 characters' });
   if (db.prepare('SELECT 1 FROM users WHERE lower(email)=lower(?)').get(email)) return res.status(400).json({ error: 'That email already has an account' });
   const bcrypt = (await import('bcryptjs')).default;
+  // No password given → generate a temp code and email it to the new user.
+  // Either way the account is locked to /api/auth/* until they set their own password.
+  const temp = password || 'T-' + crypto.randomBytes(5).toString('hex');
   const id = 'u' + Date.now();
   db.prepare('INSERT INTO users(id,name,email,pwHash,role,active,mustChangePw) VALUES(?,?,?,?,?,1,1)')
-    .run(id, name.trim(), email.trim(), bcrypt.hashSync(password, 10), role);
-  audit(req.user!, 'admin.user.create', 'user', id, `${name} (${role})`);
-  res.json({ ok: true, id });
+    .run(id, name.trim(), email.trim(), bcrypt.hashSync(temp, 10), role);
+  audit(req.user!, 'admin.user.create', 'user', id, `${name} (${role})${password ? '' : ' · temp code emailed'}`);
+  let emailed = false;
+  if (!password) {
+    const r = await sendMail({
+      to: email.trim(), subject: 'Your Trilogy account',
+      text: `Hi ${name.trim()},\n\nAn account was created for you on the Trilogy platform.\n\nSign in at https://trilogyconnections.com with this email address and the temporary code below — you'll be asked to set your own password immediately:\n\n${temp}\n\n— Trilogy Medical Networks`,
+      meta: { kind: 'temp-code', userId: id },
+    });
+    emailed = r.sent;
+  }
+  // Until email is live, hand the code back to the admin exactly once so they can relay it.
+  res.json({ ok: true, id, emailed, ...(password || emailed ? {} : { tempPassword: temp }) });
 });
 
 api.patch('/admin/users/:uid', requireAdmin, (req, res) => {
@@ -2013,6 +2052,41 @@ api.get('/admin/export', requireAdmin, (_req, res) => {
   dump.users = dump.users.map(({ pwHash, totpSecret, ...u }: any) => u);
   res.setHeader('Content-Disposition', `attachment; filename="trilogy-export-${new Date().toISOString().slice(0, 10)}.json"`);
   res.json(dump);
+});
+
+/* ================= admin: integrations (the API layer's control panel) =================
+   Status of each external service, masked view of stored keys, and write-only key entry.
+   Secrets are NEVER returned in full — masked last-4 only. Env vars of the same name win. */
+api.get('/admin/integrations', requireAdmin, (_req, res) =>
+  res.json({ services: integrationStatus(), secrets: secretsMasked() }));
+
+api.post('/admin/secrets', requireAdmin, (req, res) => {
+  const entries = Object.entries((req.body || {}) as Record<string, string>)
+    .filter(([k, v]) => (SECRET_KEYS as readonly string[]).includes(k) && typeof v === 'string' && v.trim());
+  if (!entries.length) return res.status(400).json({ error: 'Nothing to save' });
+  for (const [k, v] of entries) setSecret(k, v.trim(), req.user!.name);
+  // Audit the keys touched, never the values.
+  audit(req.user!, 'admin.secrets.set', undefined, undefined, entries.map(([k]) => k).join(', '));
+  res.json({ services: integrationStatus(), secrets: secretsMasked() });
+});
+
+/* Outbox: what tried to send. Queued = waiting on credentials; failed = live but the vendor errored. */
+api.get('/admin/outbox', requireAdmin, (_req, res) =>
+  res.json(db.prepare('SELECT id,kind,toAddr,subject,substr(body,1,400) body,patientId,status,detail,createdAt,sentAt FROM outbox ORDER BY id DESC LIMIT 200').all()));
+
+/* ================= bill OCR — reads an uploaded bill into CPT lines ================= */
+api.post('/bills/parse', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Attach the bill to read' });
+  if (!ocrReady()) return res.status(503).json({ error: 'Bill reading needs the AWS keys — an admin can add them under Admin → Integrations' });
+  try {
+    const parsed = await parseBillFile(fs.readFileSync(req.file.path));
+    fs.unlinkSync(req.file.path);   // parse-only upload; the real file goes in with the bill itself
+    if (!parsed) return res.status(422).json({ error: "Couldn't read that document" });
+    res.json(parsed);
+  } catch (err: any) {
+    try { fs.unlinkSync(req.file.path); } catch { /* already gone */ }
+    res.status(502).json({ error: 'Bill reading failed: ' + String(err?.message || err).slice(0, 120) });
+  }
 });
 
 api.post('/admin/wipe-demo', requireAdmin, (req, res) => {
