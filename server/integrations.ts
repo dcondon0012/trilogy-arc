@@ -32,6 +32,7 @@ export const SECRET_KEYS = [
   'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
   'FAXAGE_USERNAME', 'FAXAGE_COMPANY', 'FAXAGE_PASSWORD',
   'ESIGN_VENDOR', 'ESIGN_API_KEY',
+  'SENTRY_DSN',
 ] as const;
 
 const awsReady = () => !!(secret('AWS_ACCESS_KEY_ID') && secret('AWS_SECRET_ACCESS_KEY'));
@@ -62,6 +63,10 @@ export function integrationStatus() {
       needs: 'Same AWS keys as email — nothing extra.',
       keys: [],
       unlocks: 'Upload a bill → CPT lines, charges, and DOS fill themselves in' },
+    { key: 'sentry', name: 'Error reporting (Sentry)', live: !!secret('SENTRY_DSN'),
+      needs: 'Free sentry.io account → create a Node/Express project → paste the DSN it shows you.',
+      keys: ['SENTRY_DSN'],
+      unlocks: 'The app reports its own crashes and server errors with the exact cause — no waiting for someone to notice and screenshot it' },
     { key: 'clearinghouse', name: 'Clearinghouse', live: false,
       needs: 'Vendor signup (Claim.MD-class) + payer enrollment paperwork (2–6 weeks per payer — start early). Wiring follows once the account exists.',
       keys: [],
@@ -82,8 +87,10 @@ async function buildMime(m: Mail): Promise<Buffer> {
   // MailComposer handles headers, encoding, and attachments; SES just carries the bytes.
   const MailComposer = (await import('nodemailer/lib/mail-composer/index.js') as any).default;
   return new Promise((resolve, reject) => {
-    // Replies to anything Arc sends land in a real inbox (Donny's, unless overridden).
-    new MailComposer({ from: secret('SES_FROM'), replyTo: secret('SES_REPLY_TO') || 'donny@trilogyconnections.com', to: m.to, subject: m.subject, text: m.text, html: m.html, attachments: m.attachments })
+    // Replies follow the person: human-triggered sends carry the sender's email; system mail
+    // goes to the general inbox (SES_REPLY_TO — set it in Admin → Integrations once the
+    // shared mailbox exists; Donny's inbox is the fallback until then).
+    new MailComposer({ from: secret('SES_FROM'), replyTo: m.replyTo || secret('SES_REPLY_TO') || 'donny@trilogyconnections.com', to: m.to, subject: m.subject, text: m.text, html: m.html, attachments: m.attachments })
       .compile().build((err: any, msg: Buffer) => (err ? reject(err) : resolve(msg)));
   });
 }
@@ -100,6 +107,9 @@ export interface Mail {
   to: string; subject: string; text?: string; html?: string;
   attachments?: Array<{ filename: string; content: string | Buffer; contentType?: string }>;
   patientId?: string | null; meta?: any;
+  /** Where a human reply should land. Human-triggered sends pass the sender's own email;
+      system-generated mail falls back to SES_REPLY_TO (the general shared inbox). */
+  replyTo?: string | null;
 }
 
 /** Queue-always, send-when-live. Returns { sent } so callers can adapt copy. */
@@ -376,6 +386,34 @@ export async function parseBillFile(rawBytes: Buffer, mime?: string): Promise<Pa
   if (!total && expLines.length) total = Math.round(expLines.reduce((s, l) => s + l.charge * (l.units || 1), 0) * 100) / 100 || null;
   if (!dos && !total && !descr) return null;
   return { kind: 'invoice', dos, total, lines: [], descr };
+}
+
+/* ---------- error reporting (Sentry) — lazy-init; a no-op until a DSN is pasted ---------- */
+let sentry: any = null;
+let sentryDsn = '';
+async function getSentry() {
+  const dsn = secret('SENTRY_DSN');
+  if (!dsn) return null;
+  if (sentry && sentryDsn === dsn) return sentry;
+  const S = await import('@sentry/node');
+  S.init({ dsn, environment: process.env.NODE_ENV || 'development', tracesSampleRate: 0 });
+  sentry = S; sentryDsn = dsn;
+  return sentry;
+}
+/** Report an error to Sentry if configured. Never throws, never blocks the response. */
+export function reportError(err: any, context?: Record<string, any>) {
+  getSentry().then(S => {
+    if (!S) return;
+    S.withScope((scope: any) => {
+      // Context is route/method/user-role only — no PHI in error reports.
+      if (context) scope.setContext('request', context);
+      S.captureException(err instanceof Error ? err : new Error(String(err)));
+    });
+  }).catch(() => { /* reporting must never take the app down */ });
+}
+export function installProcessErrorReporting() {
+  process.on('unhandledRejection', (r) => { console.error('unhandledRejection', r); reportError(r, { kind: 'unhandledRejection' }); });
+  process.on('uncaughtException', (e) => { console.error('uncaughtException', e); reportError(e, { kind: 'uncaughtException' }); });
 }
 
 /* ---------- inbound fax (Faxage) — polls when credentials exist, lands in Requests ---------- */

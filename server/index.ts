@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { db, DATA_DIR } from './db.js';
 import { seedIfEmpty, ensureCoreUsers, flagSeedPasswords } from './seed.js';
 import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal, forgotPassword, resetPassword } from './auth.js';
-import { scheduleCheckins, scheduleFaxPolling } from './integrations.js';
+import { scheduleCheckins, scheduleFaxPolling, reportError, installProcessErrorReporting } from './integrations.js';
 import { api } from './routes.js';
 import { portal } from './portal.js';
 import { fees, seedFeeCodes, scheduleFeeRefresh } from './fees.js';
@@ -135,10 +135,13 @@ if (fs.existsSync(dist)) {
   });
 }
 
-app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);
+  // Route/method/role only — never request bodies (PHI stays out of error reports).
+  reportError(err, { method: req.method, path: req.path, role: (req as any).user?.role || 'anon' });
   res.status(500).json({ error: 'Server error' });
 });
+installProcessErrorReporting();
 
 scheduleFeeRefresh();
 scheduleCheckins();   // post-appointment SMS check-ins (queues to outbox until Twilio creds are on file)

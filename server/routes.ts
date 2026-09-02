@@ -1267,7 +1267,7 @@ api.post('/provlinks/:lid/action', async (req, res) => {
   audit(req.user!, 'provlink.' + kind, 'patient', l.patientId, pr.name);
   const pt = db.prepare('SELECT name FROM patients WHERE id=?').get(l.patientId) as any;
   const docName = kind === 'auth' ? 'Authorization' : kind === 'addauth' ? "Add'l Authorization" : kind === 'reqform' ? "Add'l Authorization Request Form" : 'Cancellation of Authorization Form';
-  const emailed = sentId ? await emailSentDoc(l.patientId, sentId, pr.corpEmail || null) : false;
+  const emailed = sentId ? await emailSentDoc(l.patientId, sentId, pr.corpEmail || null, (req.user as any)?.email || null) : false;
   sendPatient(req, res, l.patientId, sentId ? {
     _emailed: emailed,
     _doc: {
@@ -1333,8 +1333,9 @@ api.get('/patients/:id/sentdoc/:sid/print', (req, res) => {
   res.send(renderSentDocHtml(p, d));
 });
 
-/** When email is live, a sent doc really goes out — document in the body and attached. */
-async function emailSentDoc(patientId: string, sid: number, toEmail: string | null): Promise<boolean> {
+/** When email is live, a sent doc really goes out — document in the body and attached.
+    replyTo = the coordinator who sent it, so the provider's reply lands with them. */
+async function emailSentDoc(patientId: string, sid: number, toEmail: string | null, replyTo?: string | null): Promise<boolean> {
   if (!toEmail || !emailReady()) return false;
   const d = db.prepare('SELECT * FROM sent_docs WHERE id=?').get(sid) as any;
   const p = db.prepare('SELECT * FROM patients WHERE id=?').get(patientId) as any;
@@ -1343,7 +1344,7 @@ async function emailSentDoc(patientId: string, sid: number, toEmail: string | nu
   const r = await sendMail({
     to: toEmail, subject: `${d.name} — ${p.name} (${p.id}) — Trilogy Medical Networks`,
     html, attachments: [{ filename: `${d.name.replace(/[^A-Za-z0-9 ]/g, '')} - ${p.id}.html`, content: html, contentType: 'text/html' }],
-    patientId, meta: { kind: 'sentdoc', sid },
+    patientId, meta: { kind: 'sentdoc', sid }, replyTo: replyTo || null,
   });
   if (r.sent) {
     db.prepare("UPDATE sent_docs SET method='Email (sent by Arc)' WHERE id=?").run(sid);
@@ -1780,6 +1781,7 @@ api.post('/admin/users', requireAdmin, async (req, res) => {
       to: email.trim(), subject: 'Your Trilogy account',
       text: `Hi ${name.trim()},\n\nAn account was created for you on the Trilogy platform.\n\nSign in at https://trilogyconnections.com with this email address and the temporary code below — you'll be asked to set your own password immediately:\n\n${temp}\n\n— Trilogy Medical Networks`,
       meta: { kind: 'temp-code', userId: id },
+      replyTo: (req.user as any)?.email || null,   // "I can't log in" goes to the admin who made the account
     });
     emailed = r.sent;
   }
@@ -2102,6 +2104,7 @@ api.post('/admin/integrations/ses/test', requireAdmin, async (req, res) => {
     to, subject: 'Trilogy platform — test email',
     text: `This is a test from the Trilogy platform's email integration.\n\nIf you're reading this in your inbox, outbound email is working.\n\nSent ${nowMST()} by ${req.user!.name} from Admin → Integrations.`,
     meta: { kind: 'test', by: req.user!.id },
+    replyTo: (req.user as any)?.email || null,
   });
   const row = db.prepare('SELECT status, detail FROM outbox WHERE id=?').get(r.outboxId) as any;
   audit(req.user!, 'admin.ses.testEmail', undefined, undefined, `${to} — ${row?.status}`);

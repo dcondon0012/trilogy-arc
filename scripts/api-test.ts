@@ -907,6 +907,7 @@ async function main() {
   // status: all services listed, none live without credentials
   r = await call('GET', '/api/admin/integrations');
   assert(r.status === 200 && r.data.services.length >= 5 && r.data.services.every((s: any) => !s.live), 'integration status: services listed, none live yet');
+  assert(r.data.services.some((s: any) => s.key === 'sentry'), 'error reporting appears in the integrations panel');
   assert(r.data.secrets.every((s: any) => !s.masked || s.masked.includes('••') || s.masked.includes('(set')), 'secrets never returned in full');
 
   // secrets: unknown keys rejected, valid key saves and comes back masked
