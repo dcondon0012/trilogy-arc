@@ -544,11 +544,16 @@ function BillModal({ p, md, mut, onClose }: any) {
       if (!res.ok) throw new Error(data?.error || res.statusText);
       if (data.dos) setDos(data.dos);
       if (data.total) setBilled(String(data.total));
-      if (data.lines?.length) {
+      if (data.kind === 'invoice') {
+        // No CPT codes on the document — it's a general invoice, not an itemized bill.
+        setMode('invoice');
+        if (data.descr) setDescr(data.descr);
+        setItems([{ cpt: '', units: '1', charge: '' }]);
+      } else if (data.lines?.length) {
         setMode('itemized');
         setItems(data.lines.map((l: any) => ({ cpt: l.cpt || '', units: String(l.units || 1), charge: String(l.charge || '') })));
       }
-      if (!data.dos && !data.total && !data.lines?.length) alert("Couldn't find a date, total, or line items on that document — enter them by hand");
+      if (!data.dos && !data.total && !data.lines?.length && !data.descr) alert("Couldn't find a date, total, or line items on that document — enter them by hand");
     } catch (e: any) { alert(e.message); } finally { setOcring(false); }
   };
 
@@ -1246,17 +1251,22 @@ function MapTab({ p, mut, boot, go }: any) {
     const layer = layerRef.current;
     layer.clearLayers();
     const bounds: any[] = [];
+    // Symbol markers, not color-coded dots — readable for everyone incl. colorblind users.
+    const memoji = (emoji: string, big = false) => L.divIcon({
+      className: 'memoji-wrap',
+      html: `<span class="memoji${big ? ' big' : ''}">${emoji}</span>`,
+      iconSize: [30, 30], iconAnchor: [15, 15],
+    });
     if (ptLoc) {
-      L.circleMarker([ptLoc.lat, ptLoc.lon], { radius: 9, color: '#2D3647', fillColor: '#F5A623', fillOpacity: 1, weight: 2 })
+      L.marker([ptLoc.lat, ptLoc.lon], { icon: memoji('🏠', true), zIndexOffset: 1000 })
         .bindTooltip(`${p.name} (patient)`).addTo(layer);
       bounds.push([ptLoc.lat, ptLoc.lon]);
     }
     for (const x of shownPins) {
       const linked = p.provLinks.some((l: any) => l.providerId === x.provider.id);
-      const m = L.circleMarker([x.lat, x.lon], {
-        radius: 8, weight: 2, color: '#2D3647',
-        fillColor: linked ? '#45A8EB' : x.provider.status.includes('Preferred') ? '#5E9E44' : '#8B93A3', fillOpacity: 0.95,
-      }).bindTooltip(`${x.provider.name} — ${x.branch.name}`).addTo(layer);
+      const emoji = linked ? '🩺' : x.provider.status.includes('Preferred') ? '⭐' : '📍';
+      const m = L.marker([x.lat, x.lon], { icon: memoji(emoji), zIndexOffset: linked ? 500 : 0 })
+        .bindTooltip(`${x.provider.name} — ${x.branch.name}`).addTo(layer);
       m.on('click', async () => {
         const dist = ptLoc ? haversineMi(ptLoc, x) : null;
         const r = rank.find((z: any) => z.id === x.provider.id);
@@ -1304,14 +1314,21 @@ function MapTab({ p, mut, boot, go }: any) {
               </div>
             ) : (
               <div style={{ fontSize: 12.5, color: 'var(--ink-soft)', lineHeight: 1.7 }}>
-                {status || <>The patient is the marigold dot. <span style={{ color: '#45A8EB', fontWeight: 700 }}>Blue</span> pins are already on this case, <span style={{ color: 'var(--green-dark)', fontWeight: 700 }}>green</span> pins are preferred network, grey are the rest. Click any pin for distance, drive time, and the optimizer’s take.</>}
+                {status || <>Click any pin for distance, drive time, and the optimizer’s take. The legend on the map shows what each symbol means.</>}
               </div>)}
             <div style={{ marginTop: 14, fontSize: 11, color: 'var(--ink-mute)' }}>
               Maps © OpenStreetMap · drive times via OSRM. The optimizer list view lives on the Treating Providers tab.</div>
           </div>
         </div>
-        <div>
+        <div style={{ position: 'relative' }}>
           <div ref={divRef} className="mapiframe" style={{ minHeight: 460 }} />
+          {/* Legend stays visible no matter what's selected — coordinators always know the symbols. */}
+          <div className="maplegend">
+            <span>🏠 Patient</span>
+            <span>🩺 Treating this patient</span>
+            <span>⭐ Preferred network</span>
+            <span>📍 In network</span>
+          </div>
         </div>
       </div>
     </div>

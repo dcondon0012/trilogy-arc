@@ -2118,13 +2118,18 @@ api.post('/bills/parse', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Attach the bill to read' });
   if (!ocrReady()) return res.status(503).json({ error: 'Bill reading needs the AWS keys — an admin can add them under Admin → Integrations' });
   try {
-    const parsed = await parseBillFile(fs.readFileSync(req.file.path));
+    const parsed = await parseBillFile(fs.readFileSync(req.file.path), req.file.mimetype);
     fs.unlinkSync(req.file.path);   // parse-only upload; the real file goes in with the bill itself
-    if (!parsed) return res.status(422).json({ error: "Couldn't read that document" });
+    if (!parsed) return res.status(422).json({ error: "Couldn't find a date, total, or line items on that document — enter them by hand" });
     res.json(parsed);
   } catch (err: any) {
     try { fs.unlinkSync(req.file.path); } catch { /* already gone */ }
-    res.status(502).json({ error: 'Bill reading failed: ' + String(err?.message || err).slice(0, 120) });
+    const msg = String(err?.name || '').includes('UnsupportedDocument')
+      ? 'That file type couldn\'t be read — a PDF, PNG, or JPEG of the bill will work'
+      : String(err?.name || '').includes('ProvisionedThroughput') || String(err?.name || '').includes('Throttling')
+        ? 'The document reader is busy — try again in a few seconds'
+        : 'Bill reading failed: ' + String(err?.message || err).slice(0, 120);
+    res.status(502).json({ error: msg });
   }
 });
 
