@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { db, DATA_DIR } from './db.js';
 import { seedIfEmpty, ensureCoreUsers, flagSeedPasswords } from './seed.js';
 import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal, forgotPassword, resetPassword } from './auth.js';
-import { scheduleCheckins } from './integrations.js';
+import { scheduleCheckins, scheduleFaxPolling } from './integrations.js';
 import { api } from './routes.js';
 import { portal } from './portal.js';
 import { fees, seedFeeCodes, scheduleFeeRefresh } from './fees.js';
@@ -142,6 +142,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 
 scheduleFeeRefresh();
 scheduleCheckins();   // post-appointment SMS check-ins (queues to outbox until Twilio creds are on file)
+scheduleFaxPolling(); // inbound faxes → Requests queue (idle until Faxage creds are on file)
 
 app.listen(PORT, () => {
   console.log(`Trilogy Platform API on http://localhost:${PORT} (build ${BUILD})`);

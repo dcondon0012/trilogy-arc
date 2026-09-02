@@ -961,6 +961,23 @@ async function main() {
   r = await call('POST', '/api/auth/login', { email: 'nicole@trilogymed.com', password: 'brandnew123' });
   assert(r.status === 200, 'new password works after reset');
 
+  /* ---- geo batch + SES/fax admin tools (no credentials in the test env) ---- */
+  cookies = [];
+  r = await call('POST', '/api/auth/login', { email: 'donny@trilogymed.com', password: 'admin123' });
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(secret) });
+  r = await call('POST', '/api/geo/batch', { addresses: ['600 Main St, Dallas, TX 75201', '75001'] });
+  assert(r.status === 200 && typeof r.data.pending === 'number' && typeof r.data.results === 'object', 'geo batch returns results + pending count');
+  r = await call('POST', '/api/geo/batch', {});
+  assert(r.status === 400, 'geo batch requires addresses');
+  r = await call('GET', '/api/admin/integrations/ses/status');
+  assert(r.status === 503, 'SES status reports not-configured without AWS keys');
+  r = await call('POST', '/api/admin/integrations/ses/verify-address', { email: 'not-an-email' });
+  assert(r.status === 400, 'SES verify-address validates the email');
+  r = await call('POST', '/api/admin/integrations/ses/test', { to: 'donny@trilogyconnections.com' });
+  assert(r.status === 200 && r.data.sent === false && r.data.status === 'queued', 'SES test email queues when email is dark');
+  r = await call('POST', '/api/admin/integrations/fax/poll');
+  assert(r.status === 503, 'fax poll reports not-configured without Faxage keys');
+
   // put nicole back to coord123 through the same flow (keeps reruns clean)
   cookies = [];
   await call('POST', '/api/auth/forgot-password', { email: 'nicole@trilogymed.com' });

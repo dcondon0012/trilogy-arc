@@ -295,6 +295,21 @@ function Overview({ p, mut, setModal, insurer, adj, md, isAdmin, today, go }: an
           <dt><b>Coverage remaining</b></dt>
           <dd style={{ color: avail > 0 ? 'var(--green)' : 'var(--red)', fontSize: 16 }}>{fmt$(avail)}{' '}
             <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>(auto: limit − outside − usage)</span></dd>
+          {(() => {
+            // Two sides of the authorization ledger: what the carrier authorized Trilogy to
+            // incur (set on the Insurance tab), and what Trilogy has authorized out to providers.
+            const carrierAuth = p.carrierAuthorized || 0;
+            const sentAuth = p.provLinks.reduce((s: number, l: any) => s + (l.authAmount || 0), 0);
+            const headroom = carrierAuth - sentAuth;
+            return (<>
+              <dt>Carrier → Trilogy</dt>
+              <dd>{carrierAuth ? <>{fmt$(carrierAuth)} authorized · {fmt$(usage)} used · <b style={{ color: carrierAuth - usage > 0 ? 'var(--green)' : 'var(--red)' }}>{fmt$(carrierAuth - usage)}</b> left</>
+                : <span style={{ color: 'var(--muted)' }}>none on file — set it on the Insurance tab</span>}</dd>
+              <dt>Trilogy → providers</dt>
+              <dd>{sentAuth ? <>{fmt$(sentAuth)} authorized out{carrierAuth ? <> · <b style={{ color: headroom >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmt$(headroom)}</b> headroom{headroom < 0 ? ' — over the carrier authorization' : ''}</> : null}</>
+                : <span style={{ color: 'var(--muted)' }}>no provider authorizations sent yet</span>}</dd>
+            </>);
+          })()}
           <dt>Risk flags</dt><dd>{p.uw.riskFlags ? <span className="badge b-amber">{p.uw.riskFlags}</span> : '—'}</dd>
           <dt>Approved by</dt><dd>{p.uw.approvedBy || '—'}</dd>
         </dl>
@@ -1002,6 +1017,7 @@ function Providers({ p, mut, setModal, md, go, boot }: any) {
         <td>
           <div className="dd">
             <button className="btn sm" onClick={() => setDd(dd === i ? null : i)}>Send… ▾</button>
+            {dd === i && <div style={{ position: 'fixed', inset: 0, zIndex: 39 }} onClick={() => setDd(null)} />}
             {dd === i && (
               <div className="ddmenu">
                 <div className="ddi" onClick={() => action(l, 'auth')}><b>Send authorization</b><small>Creates the auth document + opens the email draft — sets Authorized</small></div>
@@ -1174,31 +1190,47 @@ function MapTab({ p, mut, boot, go }: any) {
 
   useEffect(() => { api('GET', `/optimizer?patientId=${p.id}`).then(setRank).catch(() => {}); }, [p.id]);
 
-  // geocode patient + provider branches (server-side cache keeps this cheap)
+  // geocode patient + provider branches through the batch endpoint: it answers from the
+  // server cache instantly and queues anything new (the geocoder allows ~1 new address/sec),
+  // so we poll until the queue drains and the pins fill in as they resolve.
   useEffect(() => {
     let dead = false;
+    const branchAddrs: Array<{ pr: any; b: any }> = [];
+    for (const pr of boot.providers) for (const b of pr.branches) if (b.address) branchAddrs.push({ pr, b });
+    const addresses = [...(p.address ? [p.address] : []), ...branchAddrs.map(x => x.b.address)];
+    if (!addresses.length) { setStatus('No addresses on file yet — add the patient’s address in Edit profile and office addresses on each provider.'); return; }
+
     (async () => {
       try {
-        let home: any = null;
-        if (p.address) {
-          try { home = await api('GET', '/geo/code?q=' + encodeURIComponent(p.address)); } catch { /* no patient pin */ }
-        }
-        if (!dead) setPtLoc(home);
-        const out: any[] = [];
-        for (const pr of boot.providers) {
-          for (const b of pr.branches) {
-            if (!b.address) continue;
-            try {
-              const g = await api('GET', '/geo/code?q=' + encodeURIComponent(b.address));
-              out.push({ provider: pr, branch: b, lat: g.lat, lon: g.lon });
-            } catch { /* skip unresolvable */ }
+        for (let attempt = 0; attempt < 60 && !dead; attempt++) {
+          const r = await api('POST', '/geo/batch', { addresses });
+          if (dead) return;
+          const home = p.address ? r.results[p.address] : null;
+          setPtLoc(home || null);
+          const out: any[] = []; let misses = 0;
+          for (const { pr, b } of branchAddrs) {
+            const g = r.results[b.address];
+            if (g) out.push({ provider: pr, branch: b, lat: g.lat, lon: g.lon, approx: g.approx });
+            else if (b.address in r.results) misses++;   // resolved as not-found (still-pending addresses aren't in results)
           }
+          setPins(out);
+          const notes: string[] = [];
+          if (!p.address) notes.push('No patient address on file — add it in Edit profile to see distances and drive times.');
+          else if (p.address in r.results && !home) notes.push('The patient’s address couldn’t be located — check it in Edit profile (street, city, state, ZIP).');
+          else if (home && home.approx !== 'street') notes.push(`Patient pin is approximate (${home.approx === 'zip' ? 'ZIP-level' : 'city-level'}) — distances are estimates until the street address resolves.`);
+          if (misses) notes.push(`${misses} office address${misses === 1 ? '' : 'es'} couldn’t be located.`);
+          if (r.pending > 0) {
+            setStatus(`Locating offices… ${out.length} on the map, ${r.pending} to go.${notes.length ? ' ' + notes.join(' ') : ''}`);
+            await new Promise(res2 => setTimeout(res2, 2500));
+            continue;
+          }
+          setStatus(notes.join(' '));
+          return;
         }
-        if (!dead) { setPins(out); setStatus(out.length ? '' : 'No provider addresses could be located.'); }
-      } catch { if (!dead) setStatus('Map data unavailable — geocoding service unreachable.'); }
+      } catch { if (!dead) setStatus('Map data unavailable — the location service didn’t respond. It usually recovers in a minute; switch tabs and back to retry.'); }
     })();
     return () => { dead = true; };
-  }, [p.id, boot.providers]);
+  }, [p.id, boot.providers, p.address]);
 
   const shownPins = pins.filter(x =>
     filter === 'All' ? true : filter === 'Preferred only' ? x.provider.status.includes('Preferred') : x.provider.type === filter);
@@ -1261,13 +1293,14 @@ function MapTab({ p, mut, boot, go }: any) {
                 <div style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 10px' }}>{sel.provider.type} · {sel.branch.name}<br />{sel.branch.address}</div>
                 <div className="statrow">
                   <div className="stat"><div className="sv">{sel.dist != null ? sel.dist.toFixed(1) + ' mi' : '—'}</div><div className="sl">From patient (straight line)</div></div>
-                  <div className="stat"><div className="sv">{sel.drive === 'unavailable' ? '—' : sel.drive ? `${sel.drive.min} min` : ptLoc ? '…' : '—'}</div><div className="sl">Drive time{sel.drive && sel.drive !== 'unavailable' ? ` (${sel.drive.mi} mi)` : ''}</div></div>
+                  <div className="stat"><div className="sv">{sel.drive === 'unavailable' ? '—' : sel.drive ? `${sel.drive.min} min` : ptLoc ? '…' : '—'}</div><div className="sl">{sel.drive === 'unavailable' ? 'Drive time (routing unavailable — straight-line shown)' : !ptLoc ? 'Drive time (needs patient address)' : `Drive time${sel.drive && sel.drive !== 'unavailable' ? ` (${sel.drive.mi} mi)` : ''}`}</div></div>
                   <div className="stat"><div className="sv">{sel.score ?? '—'}</div><div className="sl">Optimizer score</div></div>
                 </div>
                 {sel.reasons.length > 0 && <div style={{ fontSize: 12, color: 'var(--ink-soft)', margin: '8px 0' }}>{sel.reasons.join(' · ')}</div>}
                 {sel.linked
                   ? <span className="badge b-blue">✓ Already on this case</span>
                   : <button className="btn sm primary" onClick={() => mut(() => api('POST', `/patients/${p.id}/provlinks`, { providerId: sel.provider.id, branch: sel.branch.name || null }))}>＋ Link to patient</button>}
+                {status && <div style={{ fontSize: 11.5, color: 'var(--amber)', marginTop: 10 }}>{status}</div>}
               </div>
             ) : (
               <div style={{ fontSize: 12.5, color: 'var(--ink-soft)', lineHeight: 1.7 }}>

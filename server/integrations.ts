@@ -11,7 +11,10 @@
  *  This is what "the APIs" activate into: the app already talks to this layer
  *  everywhere; each vendor account turns one more capability from queued → live.
  */
-import { db, nowMST, audit } from './db.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { db, nowMST, audit, DATA_DIR } from './db.js';
 
 /* ---------- secrets: env wins, then the admin-entered table ---------- */
 export function secret(k: string): string {
@@ -25,7 +28,7 @@ const mask = (v: string) => (v ? (v.length > 8 ? '••••' + v.slice(-4) : 
 
 /* ---------- what each integration needs (drives the Admin panel) ---------- */
 export const SECRET_KEYS = [
-  'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'SES_FROM',
+  'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'SES_FROM', 'SES_REPLY_TO',
   'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
   'FAXAGE_USERNAME', 'FAXAGE_COMPANY', 'FAXAGE_PASSWORD',
   'ESIGN_VENDOR', 'ESIGN_API_KEY',
@@ -50,7 +53,7 @@ export function integrationStatus() {
     { key: 'fax', name: 'Fax (Faxage)', live: !!(secret('FAXAGE_USERNAME') && secret('FAXAGE_PASSWORD')), queued: q('fax'),
       needs: 'Faxage account (Professional plan ~$8/mo, sign their BAA). Paste username, company id, and password.',
       keys: ['FAXAGE_USERNAME', 'FAXAGE_COMPANY', 'FAXAGE_PASSWORD'],
-      unlocks: 'A Trilogy fax number — inbound faxes land in the Requests queue' },
+      unlocks: 'Inbound faxes to the Trilogy fax number are pulled into the Requests queue automatically (checked every 5 minutes)' },
     { key: 'esign', name: 'E-signature', live: !!secret('ESIGN_API_KEY'),
       needs: 'Vendor decision (pay-per-document with a BAA recommended) + API key. Also gated on counsel clearing the contract templates.',
       keys: ['ESIGN_VENDOR', 'ESIGN_API_KEY'],
@@ -79,7 +82,8 @@ async function buildMime(m: Mail): Promise<Buffer> {
   // MailComposer handles headers, encoding, and attachments; SES just carries the bytes.
   const MailComposer = (await import('nodemailer/lib/mail-composer/index.js') as any).default;
   return new Promise((resolve, reject) => {
-    new MailComposer({ from: secret('SES_FROM'), to: m.to, subject: m.subject, text: m.text, html: m.html, attachments: m.attachments })
+    // Replies to anything Arc sends land in a real inbox (Donny's, unless overridden).
+    new MailComposer({ from: secret('SES_FROM'), replyTo: secret('SES_REPLY_TO') || 'donny@trilogyconnections.com', to: m.to, subject: m.subject, text: m.text, html: m.html, attachments: m.attachments })
       .compile().build((err: any, msg: Buffer) => (err ? reject(err) : resolve(msg)));
   });
 }
@@ -114,6 +118,72 @@ export async function sendMail(m: Mail): Promise<{ sent: boolean; outboxId: numb
     audit(null, 'email.sendFailed', 'outbox', String(id), String(err?.message || err).slice(0, 120));
     return { sent: false, outboxId: id };
   }
+}
+
+/* ---------- SES identity management: domain verification, sandbox status, test sends ----------
+   Lets an admin do the whole email go-live from the Integrations panel:
+   set up domain DKIM (we hand back the exact DNS records for Porkbun), watch verification
+   status, verify individual addresses while the account is still in the SES sandbox, and
+   send a test email. */
+async function sesv2Client() {
+  const { SESv2Client } = await import('@aws-sdk/client-sesv2');
+  return new SESv2Client({
+    region: secret('AWS_REGION') || 'us-west-2',
+    credentials: { accessKeyId: secret('AWS_ACCESS_KEY_ID'), secretAccessKey: secret('AWS_SECRET_ACCESS_KEY') },
+  });
+}
+export const sesDomain = () => (secret('SES_FROM').split('@')[1] || 'trilogyconnections.com').toLowerCase();
+
+/** Create (or fetch) the domain identity and return the DNS records to add at the registrar. */
+export async function sesSetupDomain() {
+  const domain = sesDomain();
+  const c = await sesv2Client();
+  const { CreateEmailIdentityCommand, GetEmailIdentityCommand } = await import('@aws-sdk/client-sesv2');
+  let tokens: string[] = [];
+  try {
+    const r: any = await c.send(new CreateEmailIdentityCommand({ EmailIdentity: domain }));
+    tokens = r.DkimAttributes?.Tokens || [];
+  } catch (err: any) {
+    if (!String(err?.name || '').includes('AlreadyExists')) throw err;
+    const g: any = await c.send(new GetEmailIdentityCommand({ EmailIdentity: domain }));
+    tokens = g.DkimAttributes?.Tokens || [];
+  }
+  const records = tokens.map(t => ({
+    type: 'CNAME', host: `${t}._domainkey.${domain}`, value: `${t}.dkim.amazonses.com`,
+    note: 'DKIM — proves Trilogy sent it',
+  }));
+  records.push({
+    type: 'TXT', host: `_dmarc.${domain}`, value: 'v=DMARC1; p=none;',
+    note: 'DMARC — recommended; add only if one does not already exist',
+  } as any);
+  return { domain, records };
+}
+
+/** Verification + sandbox status for the panel. */
+export async function sesStatus() {
+  const domain = sesDomain();
+  const c = await sesv2Client();
+  const { GetEmailIdentityCommand, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+  let identity: any = null;
+  try { identity = await c.send(new GetEmailIdentityCommand({ EmailIdentity: domain })); } catch { /* not created yet */ }
+  const acct: any = await c.send(new GetAccountCommand({}));
+  return {
+    domain,
+    domainCreated: !!identity,
+    dkimStatus: identity?.DkimAttributes?.Status || 'NOT_STARTED',      // PENDING → SUCCESS once DNS records land
+    verified: !!identity?.VerifiedForSendingStatus,
+    production: !!acct.ProductionAccessEnabled,                          // false = sandbox: only verified addresses receive
+    sendQuota: acct.SendQuota?.Max24HourSend ?? null,
+  };
+}
+
+/** Sandbox helper: sends an AWS verification email to one address so tests can deliver to it. */
+export async function sesVerifyAddress(email: string) {
+  const c = await sesv2Client();
+  const { CreateEmailIdentityCommand } = await import('@aws-sdk/client-sesv2');
+  try { await c.send(new CreateEmailIdentityCommand({ EmailIdentity: email })); }
+  catch (err: any) { if (!String(err?.name || '').includes('AlreadyExists')) throw err; }
+  return { ok: true };
 }
 
 /* ---------- SMS (Twilio REST — no SDK needed) ---------- */
@@ -178,6 +248,62 @@ export async function parseBillFile(bytes: Buffer): Promise<{ dos: string | null
     }
   }
   return { dos, total, lines };
+}
+
+/* ---------- inbound fax (Faxage) — polls when credentials exist, lands in Requests ---------- */
+export const faxReady = () => !!(secret('FAXAGE_USERNAME') && secret('FAXAGE_PASSWORD'));
+const faxCreds = () => new URLSearchParams({
+  username: secret('FAXAGE_USERNAME'), company: secret('FAXAGE_COMPANY'), password: secret('FAXAGE_PASSWORD'),
+});
+
+async function faxage(params: Record<string, string>): Promise<Response> {
+  const body = faxCreds();
+  for (const [k, v] of Object.entries(params)) body.set(k, v);
+  const r = await fetch('https://api.faxage.com/httpsfax.php', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  if (!r.ok) throw new Error(`Faxage ${r.status}`);
+  return r;
+}
+
+/** Pull any new received faxes into the Requests (intake) queue. Never throws. */
+export async function pollInboundFaxes(): Promise<{ imported: number } | null> {
+  if (!faxReady()) return null;
+  try {
+    const list = await (await faxage({ operation: 'listfax' })).text();
+    if (/^ERR/m.test(list)) { audit(null, 'fax.pollError', undefined, undefined, list.slice(0, 120)); return null; }
+    let imported = 0;
+    for (const line of list.split('\n').map(l => l.trim()).filter(Boolean)) {
+      const f = line.split('\t');                    // recvid, recvdate, [starttime,] CID, DNIS, ...
+      const recvid = f[0];
+      if (!/^\d+$/.test(recvid) || db.prepare('SELECT 1 FROM fax_seen WHERE recvid=?').get(recvid)) continue;
+      const from = f.length >= 4 ? f[f.length >= 5 ? 3 : 2] : 'unknown';
+      const bytes = Buffer.from(await (await faxage({ operation: 'getfax', faxid: recvid })).arrayBuffer());
+      if (!bytes.length || /^ERR/.test(bytes.subarray(0, 8).toString())) continue;
+      const fid = crypto.randomUUID();
+      const name = `fax-${recvid}.pdf`;
+      fs.writeFileSync(path.join(DATA_DIR, 'uploads', fid), bytes);
+      db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
+        .run(fid, name, 'application/pdf', bytes.length, 'inbound-fax', nowMST());
+      db.prepare(`INSERT INTO intake_items(channel,kind,status,fileId,fileName,fromInfo,note,receivedAt)
+        VALUES('fax','bill','triage',?,?,?,?,?)`)
+        .run(fid, name, `Fax from ${from}`, `Received ${f[1] || ''}`.trim(), nowMST());
+      db.prepare('INSERT INTO fax_seen(recvid,at) VALUES(?,?)').run(recvid, nowMST());
+      audit(null, 'inbound.fax', undefined, undefined, `${name} from ${from}`);
+      imported++;
+    }
+    return { imported };
+  } catch (err: any) {
+    audit(null, 'fax.pollError', undefined, undefined, String(err?.message || err).slice(0, 120));
+    return null;
+  }
+}
+export function scheduleFaxPolling() {
+  if (process.env.NODE_ENV !== 'production' || process.env.TRILOGY_NO_FAXPOLL === '1') return;
+  setInterval(() => { pollInboundFaxes(); }, 5 * 60 * 1000);
+  setTimeout(() => { pollInboundFaxes(); }, 60 * 1000);
 }
 
 /* ---------- post-appointment SMS check-ins (runs dark until Twilio is live) ---------- */

@@ -162,8 +162,8 @@ tbody tr:hover td{background:#FBFAF6}
 .actor.sys{color:var(--blue-dark)}.actor.you{color:var(--amber)}.actor.handed{color:var(--slate)}
 
 /* ═══ context strip (case) ═══ */
-.ctx-strip{display:flex;gap:0;background:var(--card);border:1px solid var(--line);border-radius:var(--r);margin-bottom:16px;overflow-x:auto;box-shadow:var(--sh-sm)}
-.ctx-cell{padding:11px 18px;border-right:1px solid var(--line-soft);min-width:120px}
+.ctx-strip{display:flex;flex-wrap:wrap;gap:0;background:var(--card);border:1px solid var(--line);border-radius:var(--r);margin-bottom:16px;box-shadow:var(--sh-sm)}
+.ctx-cell{padding:11px 18px;border-right:1px solid var(--line-soft);min-width:120px;flex:1 0 auto}
 .ctx-cell:last-child{border-right:none}
 .ctx-cell .cl{font-size:9px;color:var(--ink-mute);text-transform:uppercase;letter-spacing:.11em;font-weight:700}
 .ctx-cell .cv{font-size:13.5px;font-weight:600;margin-top:2px;font-family:var(--mono)}

@@ -302,7 +302,9 @@ function AiWidget({ user }: { user: User }) {
   const submit = async () => { if (!text.trim()) return; setList(await api('POST', '/ai', { text })); setText(''); };
   const decide = async (id: number, status: string) => setList(await api('POST', `/ai/${id}/decide`, { status }));
   if (!open) return <button className="aifab" title="AI site editor" onClick={() => setOpen(true)}>AI</button>;
-  return (
+  return (<>
+    {/* click anywhere outside to close */}
+    <div style={{ position: 'fixed', inset: 0, zIndex: 200 }} onClick={() => setOpen(false)} />
     <div className="aipanel">
       <div className="aihead"><b>Site change requests</b>
         <span style={{ cursor: 'pointer', fontSize: 18 }} onClick={() => setOpen(false)}>✕</span></div>
@@ -322,7 +324,7 @@ function AiWidget({ user }: { user: User }) {
         {!list.length && <div style={{ color: 'var(--ink-mute)', fontSize: 12 }}>No requests yet.</div>}
       </div>
     </div>
-  );
+  </>);
 }
 
 /* ═══════════ shell ═══════════ */
@@ -420,6 +422,7 @@ export default function App() {
                 <button className="btn sm" onClick={() => setAlertsOpen(o => !o)} title="Alerts">
                   Alerts{alerts.length > 0 && <span className={'badge ' + (high ? 'b-red' : 'b-amber')} style={{ marginLeft: 4 }}>{alerts.length}</span>}
                 </button>
+                {alertsOpen && <div style={{ position: 'fixed', inset: 0, zIndex: 69 }} onClick={() => setAlertsOpen(false)} />}
                 {alertsOpen && (
                   <div className="usermenu" style={{ right: 0, top: 40, minWidth: 380, maxHeight: 420, overflowY: 'auto' }}>
                     <div className="um" style={{ cursor: 'default', fontWeight: 700 }}>
@@ -434,6 +437,7 @@ export default function App() {
               </div>
               <span className="rolechip">{boot.user.role}</span>
               <div className="avatar" onClick={() => setMenu(m => !m)}>{initials(boot.user.name)}</div>
+              {menu && <div style={{ position: 'fixed', inset: 0, zIndex: 69 }} onClick={() => setMenu(false)} />}
               {menu && (
                 <div className="usermenu">
                   <div className="um" style={{ cursor: 'default', fontWeight: 700 }}>{boot.user.name} — {boot.user.email}</div>

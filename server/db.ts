@@ -343,6 +343,10 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, kind)`);
 
 db.exec(`CREATE TABLE IF NOT EXISTS geo_cache(k TEXT PRIMARY KEY, lat REAL, lon REAL, at TEXT)`);
 db.exec(`CREATE TABLE IF NOT EXISTS route_cache(k TEXT PRIMARY KEY, seconds REAL, meters REAL, at TEXT)`);
+// approx: how precisely the address resolved — 'street' | 'city' | 'zip' | 'notfound' (lat/lon NULL).
+migrate('ALTER TABLE geo_cache ADD COLUMN approx TEXT');
+// Inbound faxes already imported from Faxage — so polling never duplicates an intake item.
+db.exec(`CREATE TABLE IF NOT EXISTS fax_seen(recvid TEXT PRIMARY KEY, at TEXT)`);
 // One-time: rename the Misc document category to Other.
 if (!db.prepare("SELECT 1 FROM counters WHERE k='mig_docs_other'").get()) {
   db.prepare("UPDATE documents SET cat='Other' WHERE cat='Misc'").run();

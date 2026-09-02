@@ -281,6 +281,8 @@ function IntegrationsTab() {
               </div>
               <div style={{ fontSize: 12.5, marginTop: 6 }}><b>Unlocks:</b> {s.unlocks}</div>
               {!s.live && <div style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 4 }}><b>What Donny/Miles need to get:</b> {s.needs}</div>}
+              {s.key === 'email' && s.live && <EmailGoLive />}
+              {s.key === 'fax' && s.live && <FaxTools />}
               {editing === s.key && (
                 <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
                   {s.keys.map(k => {
@@ -329,6 +331,96 @@ function IntegrationsTab() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ---- Email go-live: domain DNS records, verification status, sandbox verify, test send ---- */
+function EmailGoLive() {
+  const [st, setSt] = useState<any>(null);
+  const [dns, setDns] = useState<any>(null);
+  const [verifyTo, setVerifyTo] = useState('');
+  const [testTo, setTestTo] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState('');
+
+  const run = async (key: string, fn: () => Promise<void>) => {
+    setBusy(key); setMsg('');
+    try { await fn(); } catch (e: any) { setMsg(e.message || 'Error'); } finally { setBusy(''); }
+  };
+  const checkStatus = () => run('status', async () => setSt(await api('GET', '/admin/integrations/ses/status')));
+  useEffect(() => { checkStatus(); }, []);
+
+  const badge = (ok: boolean, yes: string, no: string) =>
+    ok ? <span className="badge b-green">{yes}</span> : <span className="badge b-amber">{no}</span>;
+
+  return (
+    <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <b style={{ fontSize: 12.5 }}>Go-live checklist</b>
+        {st && (<>
+          {badge(st.domainCreated && st.dkimStatus === 'SUCCESS', 'Domain verified', st.domainCreated ? `Domain: DNS pending (${st.dkimStatus})` : 'Domain: not set up')}
+          {badge(st.production, 'Production sending', 'Sandbox — only verified addresses receive')}
+        </>)}
+        <button className="btn sm" disabled={busy === 'status'} onClick={checkStatus}>{busy === 'status' ? 'Checking…' : 'Refresh status'}</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+        <button className="btn sm" disabled={busy === 'dns'}
+          onClick={() => run('dns', async () => setDns(await api('POST', '/admin/integrations/ses/domain')))}>
+          {busy === 'dns' ? 'Working…' : dns ? 'Refresh DNS records' : '1. Get DNS records for Porkbun'}</button>
+        <span style={{ display: 'flex', gap: 6 }}>
+          <input placeholder="2. Verify an inbox (sandbox)" value={verifyTo} onChange={e => setVerifyTo(e.target.value)}
+            style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '6px 10px', fontSize: 12, width: 210 }} />
+          <button className="btn sm" disabled={busy === 'verify' || !verifyTo.trim()}
+            onClick={() => run('verify', async () => { const r = await api('POST', '/admin/integrations/ses/verify-address', { email: verifyTo.trim() }); setMsg(r.message); })}>Send verify link</button>
+        </span>
+        <span style={{ display: 'flex', gap: 6 }}>
+          <input placeholder="3. Send a test email to…" value={testTo} onChange={e => setTestTo(e.target.value)}
+            style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '6px 10px', fontSize: 12, width: 210 }} />
+          <button className="btn sm primary" disabled={busy === 'test' || !testTo.trim()}
+            onClick={() => run('test', async () => {
+              const r = await api('POST', '/admin/integrations/ses/test', { to: testTo.trim() });
+              setMsg(r.sent ? 'Sent — check the inbox (and spam, the first time).' : `Not delivered (${r.status})${r.detail ? ': ' + r.detail : ''}`);
+            })}>{busy === 'test' ? 'Sending…' : 'Send test'}</button>
+        </span>
+      </div>
+
+      {msg && <div style={{ fontSize: 12, marginTop: 8, color: msg.startsWith('Sent') || msg.startsWith('AWS is emailing') ? 'var(--green-dark)' : 'var(--red)' }}>{msg}</div>}
+
+      {dns && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 12, marginBottom: 6 }}>
+            Add these at <b>Porkbun → Domain Management → {dns.domain} → DNS records</b>. Do NOT change any MX records (that's the company email). Verification usually completes within an hour of adding them — use Refresh status to watch.</div>
+          <table><tbody>
+            <tr><th>Type</th><th>Host</th><th>Answer / value</th><th>Why</th></tr>
+            {dns.records.map((r: any, i: number) => (
+              <tr key={i}>
+                <td><span className="idchip">{r.type}</span></td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r.host}</td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r.value}</td>
+                <td style={{ fontSize: 11.5, color: 'var(--muted)' }}>{r.note}</td>
+              </tr>))}
+          </tbody></table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- Fax tools: pull inbound faxes on demand (poller also runs every 5 min) ---- */
+function FaxTools() {
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  return (
+    <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+      <button className="btn sm" disabled={busy} onClick={async () => {
+        setBusy(true); setMsg('');
+        try { const r = await api('POST', '/admin/integrations/fax/poll'); setMsg(r.message); }
+        catch (e: any) { setMsg(e.message || 'Error'); } finally { setBusy(false); }
+      }}>{busy ? 'Checking…' : 'Check for new faxes now'}</button>
+      {msg && <span style={{ fontSize: 12, color: msg.includes('added') ? 'var(--green-dark)' : 'var(--muted)' }}>{msg}</span>}
+      <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>New faxes land in the Requests queue. Send a test fax to the Trilogy number, then click this.</span>
     </div>
   );
 }

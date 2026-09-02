@@ -14,7 +14,11 @@ import {
   driftReport, carrierTier, providerScore, carrierReport, outboundDrafts, normFor,
 } from './engines.js';
 import { medicareFor } from './fees.js';
-import { sendMail, integrationStatus, secretsMasked, setSecret, SECRET_KEYS, parseBillFile, ocrReady, emailReady } from './integrations.js';
+import {
+  sendMail, integrationStatus, secretsMasked, setSecret, SECRET_KEYS, parseBillFile, ocrReady, emailReady,
+  sesSetupDomain, sesStatus, sesVerifyAddress, pollInboundFaxes,
+} from './integrations.js';
+import { geocode, geoBatch, route } from './geo.js';
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -1934,37 +1938,27 @@ api.get('/patients/:id/financials', requireAdmin, (req, res) => {
   });
 });
 
-/* ================= geocoding & drive time (OpenStreetMap / OSRM, cached) ================= */
-const GEO_UA = { 'User-Agent': 'TrilogyPlatform/1.0 (internal provider map; trilogyconnections.com)' };
+/* ================= geocoding & drive time (OpenStreetMap / OSRM via server/geo.ts) ================= */
 api.get('/geo/code', async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'q required' });
-  const key = q.toLowerCase();
-  const hit = db.prepare('SELECT lat, lon FROM geo_cache WHERE k=?').get(key) as any;
-  if (hit) return res.json({ lat: hit.lat, lon: hit.lon, cached: true });
-  try {
-    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=${encodeURIComponent(q)}`, { headers: GEO_UA });
-    const d: any = await r.json();
-    if (!Array.isArray(d) || !d[0]) return res.status(404).json({ error: 'Address not found' });
-    const lat = parseFloat(d[0].lat), lon = parseFloat(d[0].lon);
-    db.prepare('INSERT OR REPLACE INTO geo_cache(k,lat,lon,at) VALUES(?,?,?,?)').run(key, lat, lon, nowMST());
-    res.json({ lat, lon });
-  } catch { res.status(502).json({ error: 'Geocoding service unreachable' }); }
+  const g = await geocode(q);
+  if (!g) return res.status(404).json({ error: 'Address not found' });
+  res.json(g);
+});
+/* Batch: answers from cache immediately and queues the rest (Nominatim allows 1 lookup/sec
+   globally, so a fresh map fills in over ~1s per new address). Client polls while pending>0. */
+api.post('/geo/batch', (req, res) => {
+  const addresses = Array.isArray(req.body?.addresses) ? req.body.addresses : [];
+  if (!addresses.length) return res.status(400).json({ error: 'addresses[] required' });
+  res.json(geoBatch(addresses));
 });
 api.get('/geo/route', async (req, res) => {
   const { flat, flon, tlat, tlon } = req.query as any;
   if (![flat, flon, tlat, tlon].every(x => Number.isFinite(parseFloat(x)))) return res.status(400).json({ error: 'flat/flon/tlat/tlon required' });
-  const key = [flat, flon, tlat, tlon].map(x => Number(x).toFixed(4)).join(',');
-  const hit = db.prepare('SELECT seconds, meters FROM route_cache WHERE k=?').get(key) as any;
-  if (hit) return res.json({ seconds: hit.seconds, meters: hit.meters, cached: true });
-  try {
-    const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${flon},${flat};${tlon},${tlat}?overview=false`, { headers: GEO_UA });
-    const d: any = await r.json();
-    const route = d?.routes?.[0];
-    if (!route) return res.status(404).json({ error: 'No route found' });
-    db.prepare('INSERT OR REPLACE INTO route_cache(k,seconds,meters,at) VALUES(?,?,?,?)').run(key, route.duration, route.distance, nowMST());
-    res.json({ seconds: route.duration, meters: route.distance });
-  } catch { res.status(502).json({ error: 'Routing service unreachable' }); }
+  const rt = await route(parseFloat(flat), parseFloat(flon), parseFloat(tlat), parseFloat(tlon));
+  if (!rt) return res.status(404).json({ error: 'No route found' });
+  res.json(rt);
 });
 
 /* ================= provider contracts: BAA + rate agreement gate ================= */
@@ -2068,6 +2062,51 @@ api.post('/admin/secrets', requireAdmin, (req, res) => {
   // Audit the keys touched, never the values.
   audit(req.user!, 'admin.secrets.set', undefined, undefined, entries.map(([k]) => k).join(', '));
   res.json({ services: integrationStatus(), secrets: secretsMasked() });
+});
+
+/* SES go-live tools — domain DNS records, verification status, sandbox address verify, test send. */
+api.post('/admin/integrations/ses/domain', requireAdmin, async (req, res) => {
+  if (!emailReady()) return res.status(503).json({ error: 'Save the AWS keys and SES_FROM first' });
+  try {
+    const r = await sesSetupDomain();
+    audit(req.user!, 'admin.ses.domainSetup', undefined, undefined, r.domain);
+    res.json(r);
+  } catch (err: any) { res.status(502).json({ error: 'AWS said: ' + String(err?.message || err).slice(0, 200) }); }
+});
+api.get('/admin/integrations/ses/status', requireAdmin, async (_req, res) => {
+  if (!emailReady()) return res.status(503).json({ error: 'Save the AWS keys and SES_FROM first' });
+  try { res.json(await sesStatus()); }
+  catch (err: any) { res.status(502).json({ error: 'AWS said: ' + String(err?.message || err).slice(0, 200) }); }
+});
+api.post('/admin/integrations/ses/verify-address', requireAdmin, async (req, res) => {
+  const email = String(req.body?.email || '').trim();
+  if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Valid email required' });
+  if (!emailReady()) return res.status(503).json({ error: 'Save the AWS keys and SES_FROM first' });
+  try {
+    await sesVerifyAddress(email);
+    audit(req.user!, 'admin.ses.verifyAddress', undefined, undefined, email);
+    res.json({ ok: true, message: `AWS is emailing ${email} a verification link — click it, then test sends can deliver there even in sandbox mode.` });
+  } catch (err: any) { res.status(502).json({ error: 'AWS said: ' + String(err?.message || err).slice(0, 200) }); }
+});
+api.post('/admin/integrations/ses/test', requireAdmin, async (req, res) => {
+  const to = String(req.body?.to || '').trim();
+  if (!/^\S+@\S+\.\S+$/.test(to)) return res.status(400).json({ error: 'Valid email required' });
+  const r = await sendMail({
+    to, subject: 'Trilogy platform — test email',
+    text: `This is a test from the Trilogy platform's email integration.\n\nIf you're reading this in your inbox, outbound email is working.\n\nSent ${nowMST()} by ${req.user!.name} from Admin → Integrations.`,
+    meta: { kind: 'test', by: req.user!.id },
+  });
+  const row = db.prepare('SELECT status, detail FROM outbox WHERE id=?').get(r.outboxId) as any;
+  audit(req.user!, 'admin.ses.testEmail', undefined, undefined, `${to} — ${row?.status}`);
+  res.json({ sent: r.sent, status: row?.status, detail: row?.detail || null });
+});
+
+/* Fax: pull inbound faxes on demand (the poller also runs every 5 min in production). */
+api.post('/admin/integrations/fax/poll', requireAdmin, async (req, res) => {
+  const r = await pollInboundFaxes();
+  if (!r) return res.status(503).json({ error: 'Fax polling failed or Faxage keys are missing — see the audit log for the reason' });
+  audit(req.user!, 'admin.fax.poll', undefined, undefined, `${r.imported} imported`);
+  res.json({ ok: true, imported: r.imported, message: r.imported ? `${r.imported} new fax${r.imported === 1 ? '' : 'es'} added to the Requests queue` : 'No new faxes waiting' });
 });
 
 /* Outbox: what tried to send. Queued = waiting on credentials; failed = live but the vendor errored. */
