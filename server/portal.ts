@@ -213,13 +213,14 @@ portal.post('/provider/auth-request', (req, res) => {
   const amt = Number(amount) || 0;
   const env = envelope(patientId);
   const link = db.prepare('SELECT * FROM prov_links WHERE patientId=? AND providerId=?').get(patientId, req.user!.orgId) as any;
-  if (amt > 0 && env.limit > 0 && amt <= env.remaining && link && link.status !== 'canceled') {
+  if (amt > 0 && env.cap > 0 && amt <= env.remaining && link && link.status !== 'canceled') {
+    const basisWord = env.basis === 'auth' ? "the carrier's case authorization" : 'the coverage envelope';
     db.prepare("UPDATE prov_links SET authAmount=authAmount+?, authCount=authCount+1, status='authorized' WHERE id=?").run(amt, link.id);
     db.prepare('INSERT INTO sent_docs(patientId,name,toStr,time,status,method) VALUES(?,?,?,?,?,?)')
       .run(patientId, "Add'l Authorization (auto — within envelope)", pr.name, nowMST(), 'Sent', 'Email');
-    addNote(patientId, `Auth auto-approved: ${fmt$(amt)} to ${pr.name} — within the coverage envelope (${fmt$(env.remaining - amt)} remains). No human wait.`, 'system');
+    addNote(patientId, `Auth auto-approved: ${fmt$(amt)} to ${pr.name} — within ${basisWord} (${fmt$(env.remaining - amt)} remains). No human wait.`, 'system');
     audit(req.user!, 'auth.autoApprove', 'patient', patientId, `${amt} to ${pr.name}`);
-    return res.json({ ok: true, auto: true, message: `Approved automatically — ${fmt$(amt)} fits the coverage envelope. Authorization is on its way.` });
+    return res.json({ ok: true, auto: true, message: `Approved automatically — ${fmt$(amt)} fits ${basisWord}. Authorization is on its way.` });
   }
 
   const tid = 't' + Date.now() + Math.floor(Math.random() * 1000);

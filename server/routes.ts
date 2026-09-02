@@ -372,15 +372,14 @@ api.get('/deck', (req, res) => {
     const amtMatch = t.title.match(/\$([\d,]+(?:\.\d{2})?)/);
     const amt = amtMatch ? parseFloat(amtMatch[1].replace(/,/g, '')) : 0;
     const link = db.prepare('SELECT l.*, pr.name AS prName FROM prov_links l JOIN providers pr ON pr.id=l.providerId WHERE l.patientId=? LIMIT 1').get(t.patientId) as any;
-    const pt = myPts.find(p => p.id === t.patientId);
-    const outside = (db.prepare('SELECT COALESCE(SUM(amt),0) s FROM outside_bills WHERE patientId=?').get(t.patientId) as any).s;
-    const usage = (db.prepare('SELECT COALESCE(SUM(billed),0) s FROM bills WHERE patientId=? AND voided=0').get(t.patientId) as any).s;
-    const remaining = (pt?.uwLimit || 0) - outside - usage;
+    const env = envelope(t.patientId);
+    const remaining = env.remaining, usage = env.usage;
+    const basisWord = env.basis === 'auth' ? 'Carrier auth' : 'Coverage';
     const fits = amt > 0 && amt <= remaining;
     cards.push({
       id: 'auth-' + t.id, type: fits ? 'Auth request · within envelope' : '◉ Auth request · utilization check', stripe: fits ? 'blue' : 'amber', actor: fits ? 'sys' : 'you',
       title: t.title.replace('Auth request from ', 'More auth — '), patientId: t.patientId, patientName: pName(t.patientId),
-      sub: `Coverage remaining ${fmt$(remaining)}${amt ? ` · request ${fmt$(amt)}` : ''}`,
+      sub: `${basisWord} remaining ${fmt$(remaining)}${amt ? ` · request ${fmt$(amt)}` : ''}`,
       outcome: `Care continues without delay — and only as much as the coverage supports.`,
       recommend: fits
         ? `Approve — fits the envelope with ${fmt$(remaining - amt)} to spare. Containment intact.`
@@ -428,21 +427,22 @@ api.get('/deck', (req, res) => {
     });
   }
 
-  // 6 · Coverage exceeded / nearly exhausted (containment reds)
+  // 6 · Authorization/coverage exceeded / nearly exhausted (containment reds)
   for (const p of myPts) {
-    if (!p.uwLimit || p.stage >= 4) continue;
-    const outside = (db.prepare('SELECT COALESCE(SUM(amt),0) s FROM outside_bills WHERE patientId=?').get(p.id) as any).s;
-    const usage = (db.prepare('SELECT COALESCE(SUM(billed),0) s FROM bills WHERE patientId=? AND voided=0').get(p.id) as any).s;
-    const remaining = p.uwLimit - outside - usage;
-    if (remaining < p.uwLimit * 0.15) {
+    if (p.stage >= 4) continue;
+    const env = envelope(p.id);
+    if (!env.cap) continue;
+    const remaining = env.remaining, usage = env.usage, outside = env.outside;
+    const basisWord = env.basis === 'auth' ? 'carrier authorization' : 'coverage';
+    if (remaining < env.cap * 0.15) {
       cards.push({
-        id: 'cov-' + p.id, type: '◉ Cost control · coverage ' + (remaining < 0 ? 'EXCEEDED' : 'nearly exhausted'), stripe: 'red', actor: 'you',
-        title: `${p.name} — ${remaining < 0 ? fmt$(-remaining) + ' over coverage' : fmt$(remaining) + ' remaining'}`,
+        id: 'cov-' + p.id, type: `◉ Cost control · ${basisWord} ` + (remaining < 0 ? 'EXCEEDED' : 'nearly exhausted'), stripe: 'red', actor: 'you',
+        title: `${p.name} — ${remaining < 0 ? fmt$(-remaining) + ' over ' + basisWord : fmt$(remaining) + ' remaining'}`,
         patientId: p.id, patientName: p.name,
-        sub: `Limit ${fmt$(p.uwLimit)} · used ${fmt$(usage)} · outside ${fmt$(outside)}`,
-        outcome: `The carrier never sees a surprise — treatment lands inside coverage or gets a decision first.`,
-        recommend: remaining < 0 ? `Stop further authorizations; review the treatment plan with the provider today.` : `Flag discharge-readiness with the provider; no new auths without review.`,
-        tiles: [tile(fmt$(p.uwLimit), 'limit'), tile(fmt$(usage), 'used'), tile(fmt$(outside), 'outside'), tile(fmt$(remaining), 'remaining')],
+        sub: `${env.basis === 'auth' ? 'Authorized' : 'Limit'} ${fmt$(env.cap)} · used ${fmt$(usage)}${env.basis === 'auth' ? '' : ` · outside ${fmt$(outside)}`}`,
+        outcome: `The carrier never sees a surprise — treatment lands inside its authorization or gets a decision first.`,
+        recommend: remaining < 0 ? `Stop further authorizations; review the treatment plan with the provider today.` : `${env.basis === 'auth' ? 'Request additional authorization from the carrier or flag' : 'Flag'} discharge-readiness with the provider; no new auths without review.`,
+        tiles: [tile(fmt$(env.cap), env.basis === 'auth' ? 'authorized' : 'limit'), tile(fmt$(usage), 'used'), tile(fmt$(outside), 'outside'), tile(fmt$(remaining), 'remaining')],
         actions: [{ label: '✓ Reviewed — note it', method: 'POST', path: `/patients/${p.id}/notes`, body: { text: 'Coverage-exhaustion review completed — treatment plan checked against remaining coverage' }, style: 'primary' }],
         chips: ['Open the case', 'Message the provider'], age: today,
       });
@@ -1184,6 +1184,13 @@ api.patch('/patients/:id/uw', (req, res) => {
   const v = req.body || {};
   db.prepare('UPDATE patients SET uwStatus=?,uwCoverage=?,uwLimit=?,uwRiskFlags=?,uwApprovedBy=? WHERE id=?')
     .run(v.status ?? 'Not started', v.coverage ?? null, Number(v.limit) || 0, v.riskFlags ?? null, v.approvedBy ?? null, req.params.id);
+  // Carrier authorization for the case — the operative number the case works off.
+  if ('carrierAuthorized' in v) {
+    const amt = Number(v.carrierAuthorized) || 0;
+    const prev = (db.prepare('SELECT carrierAuthorized FROM patients WHERE id=?').get(req.params.id) as any)?.carrierAuthorized || 0;
+    db.prepare('UPDATE patients SET carrierAuthorized=? WHERE id=?').run(amt, req.params.id);
+    if (amt !== prev) addNote(req.params.id, `Carrier authorization for this case set to ${fmt$(amt)}${prev ? ` (was ${fmt$(prev)})` : ''} — case now works off this number`, req.user!.name);
+  }
   addNote(req.params.id, `Underwriting updated (${v.status})`, req.user!.name);
   audit(req.user!, 'uw.update', 'patient', req.params.id);
   sendPatient(req, res, req.params.id);

@@ -1,0 +1,8 @@
+node_modules
+client/node_modules
+data
+data-*
+.git
+*.log
+deploy/terraform/.terraform
+deploy/terraform/*.tfstate*

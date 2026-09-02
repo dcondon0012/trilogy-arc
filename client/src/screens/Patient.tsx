@@ -104,12 +104,15 @@ export function PatientScreen({ id }: { id: string }) {
       {(() => {
         const outside = p.uw.outsideBills.reduce((s: number, b: any) => s + b.amt, 0);
         const usage = p.bills.reduce((s: number, b: any) => s + (b.voided ? 0 : b.billed || 0), 0);
-        const avail = (p.uw.limit || 0) - outside - usage;
-        const pct = p.uw.limit ? Math.round((outside + usage) / p.uw.limit * 100) : null;
+        // The case works off the carrier's authorization when one is on file; policy limit is the fallback.
+        const auth = p.carrierAuthorized || 0;
+        const cap = auth > 0 ? auth : (p.uw.limit || 0);
+        const avail = auth > 0 ? auth - usage : (p.uw.limit || 0) - outside - usage;
+        const pct = cap ? Math.round((auth > 0 ? usage : outside + usage) / cap * 100) : null;
         return (
           <div className="ctx-strip">
-            <div className="ctx-cell"><div className="cl">Coverage remaining</div><div className={'cv' + (avail < 0 ? ' bad' : '')}>{p.uw.limit ? `$${avail.toLocaleString()}` : '—'}</div></div>
-            <div className="ctx-cell"><div className="cl">Coverage used</div><div className={'cv' + (pct !== null && pct >= 75 ? ' warn' : '')}>{pct !== null ? pct + '%' : '—'}</div></div>
+            <div className="ctx-cell"><div className="cl">{auth ? 'Auth remaining' : 'Coverage remaining'}</div><div className={'cv' + (avail < 0 ? ' bad' : '')}>{cap ? `$${avail.toLocaleString()}` : '—'}</div></div>
+            <div className="ctx-cell"><div className="cl">{auth ? 'Auth used' : 'Coverage used'}</div><div className={'cv' + (pct !== null && pct >= 75 ? ' warn' : '')}>{pct !== null ? pct + '%' : '—'}</div></div>
             <div className="ctx-cell"><div className="cl">Consent on file</div><div className={'cv' + (p.consentSharing ? ' good' : ' warn')}>{p.consentSharing ? 'Yes' : 'Not yet'}</div></div>
             <div className="ctx-cell"><div className="cl">Attorney</div><div className={'cv' + (p.attorneyRetained ? ' bad' : ' good')}>{p.attorneyRetained ? 'Retained' : 'None'}</div></div>
             <div className="ctx-cell"><div className="cl">Carrier confirmed</div><div className={'cv' + (p.carrierConfirmed ? ' good' : ' warn')}>{p.carrierConfirmed ? 'Yes' : 'Pending'}</div></div>
@@ -177,9 +180,10 @@ function Overview({ p, mut, setModal, insurer, adj, md, isAdmin, today, go }: an
       fields={[
         { key: 'status', label: 'Status', type: 'select', value: p.uw.status, options: ['Not started', 'In review', 'Approved', 'Declined'].map(x => ({ v: x, l: x })) },
         { key: 'coverage', label: 'Coverage type', value: p.uw.coverage },
-        { key: 'limit', label: 'Coverage limit ($)', type: 'number', value: String(p.uw.limit || 0) },
+        { key: 'limit', label: 'Whole-case coverage limit ($) — the policy ceiling, context only', type: 'number', value: String(p.uw.limit || 0), full: true },
+        { key: 'carrierAuthorized', label: 'Carrier authorization for this case ($) — THE number the case works off', type: 'number', value: String(p.carrierAuthorized || 0), full: true },
         { key: 'riskFlags', label: 'Risk flags', value: p.uw.riskFlags },
-        { key: 'approvedBy', label: 'Approved by', value: p.uw.approvedBy, full: true },
+        { key: 'approvedBy', label: 'Approved by', value: p.uw.approvedBy },
       ]}
       onSave={async v => { await mut(() => api('PATCH', `/patients/${p.id}/uw`, v)); setModal(null); }} />);
 
@@ -292,21 +296,22 @@ function Overview({ p, mut, setModal, insurer, adj, md, isAdmin, today, go }: an
               <button className="btn sm" onClick={addOutside}>＋</button>
             </div>
           </dd>
-          <dt><b>Coverage remaining</b></dt>
-          <dd style={{ color: avail > 0 ? 'var(--green)' : 'var(--red)', fontSize: 16 }}>{fmt$(avail)}{' '}
-            <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>(auto: limit − outside − usage)</span></dd>
           {(() => {
-            // Two sides of the authorization ledger: what the carrier authorized Trilogy to
-            // incur (set on the Insurance tab), and what Trilogy has authorized out to providers.
+            // The case works off the CARRIER'S AUTHORIZATION; the policy limit is context.
             const carrierAuth = p.carrierAuthorized || 0;
             const sentAuth = p.provLinks.reduce((s: number, l: any) => s + (l.authAmount || 0), 0);
             const headroom = carrierAuth - sentAuth;
+            const working = carrierAuth > 0 ? carrierAuth - usage : avail;
             return (<>
-              <dt>Carrier → Trilogy</dt>
-              <dd>{carrierAuth ? <>{fmt$(carrierAuth)} authorized · {fmt$(usage)} used · <b style={{ color: carrierAuth - usage > 0 ? 'var(--green)' : 'var(--red)' }}>{fmt$(carrierAuth - usage)}</b> left</>
-                : <span style={{ color: 'var(--muted)' }}>none on file — set it on the Insurance tab</span>}</dd>
-              <dt>Trilogy → providers</dt>
-              <dd>{sentAuth ? <>{fmt$(sentAuth)} authorized out{carrierAuth ? <> · <b style={{ color: headroom >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmt$(headroom)}</b> headroom{headroom < 0 ? ' — over the carrier authorization' : ''}</> : null}</>
+              <dt>Carrier authorization</dt>
+              <dd>{carrierAuth
+                ? <><b>{fmt$(carrierAuth)}</b> <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>— the case works off this</span></>
+                : <span style={{ color: 'var(--amber)' }}>not set — enter it via ✎ Edit underwriting (falling back to the policy limit meanwhile)</span>}</dd>
+              <dt><b>{carrierAuth ? 'Auth remaining' : 'Coverage remaining'}</b></dt>
+              <dd style={{ color: working > 0 ? 'var(--green)' : 'var(--red)', fontSize: 16 }}>{fmt$(working)}{' '}
+                <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>{carrierAuth ? '(auto: authorization − our billed usage)' : '(auto: limit − outside − usage)'}</span></dd>
+              <dt>Authorized to providers</dt>
+              <dd>{sentAuth ? <>{fmt$(sentAuth)} out{carrierAuth ? <> · <b style={{ color: headroom >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmt$(headroom)}</b> headroom{headroom < 0 ? ' — over the carrier authorization' : ''}</> : null}</>
                 : <span style={{ color: 'var(--muted)' }}>no provider authorizations sent yet</span>}</dd>
             </>);
           })()}

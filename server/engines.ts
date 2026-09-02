@@ -11,13 +11,22 @@ export const VISIT_NORMS: Record<string, number> = {
 };
 export const normFor = (type?: string | null) => VISIT_NORMS[type || ''] ?? VISIT_NORMS.default;
 
-/* ── envelope ─────────────────────────────────────────────── */
+/* ── envelope ─────────────────────────────────────────────────
+   Two numbers, different jobs (Donny, 09/02): the POLICY LIMIT is the whole case's
+   ceiling (context), but the case WORKS OFF the carrier's AUTHORIZATION to Trilogy.
+   When an authorization is on file it is the operative cap and Trilogy's own billed
+   usage draws it down (outside bills draw the policy, not our authorization).
+   With no authorization yet, we fall back to the old policy-limit arithmetic. */
 export function envelope(patientId: string) {
-  const p = db.prepare('SELECT uwLimit FROM patients WHERE id=?').get(patientId) as any;
+  const p = db.prepare('SELECT uwLimit, carrierAuthorized FROM patients WHERE id=?').get(patientId) as any;
   const outside = (db.prepare('SELECT COALESCE(SUM(amt),0) s FROM outside_bills WHERE patientId=?').get(patientId) as any).s;
   const usage = (db.prepare('SELECT COALESCE(SUM(billed),0) s FROM bills WHERE patientId=? AND voided=0').get(patientId) as any).s;
   const limit = p?.uwLimit || 0;
-  return { limit, outside, usage, remaining: limit - outside - usage };
+  const auth = p?.carrierAuthorized || 0;
+  const basis: 'auth' | 'limit' = auth > 0 ? 'auth' : 'limit';
+  const cap = basis === 'auth' ? auth : limit;
+  const remaining = basis === 'auth' ? auth - usage : limit - outside - usage;
+  return { limit, auth, basis, cap, outside, usage, remaining };
 }
 
 /* ── the four-check auto-pay verdict ──────────────────────── */
@@ -34,12 +43,14 @@ export function billChecks(bill: any): { checks: Check[]; verdict: 'green' | 'ex
   // ② envelope covers (BI cases without a PIP limit pass with a note)
   const env = envelope(bill.patientId);
   const caseType = (db.prepare('SELECT caseType FROM patients WHERE id=?').get(bill.patientId) as any)?.caseType;
-  const envOk = env.limit === 0 ? caseType === 'trilogy' : env.remaining >= 0;
+  const envOk = env.cap === 0 ? caseType === 'trilogy' : env.remaining >= 0;
   checks.push({
-    key: 'envelope', label: 'Coverage envelope', status: envOk ? 'pass' : 'fail',
-    detail: env.limit === 0
-      ? (caseType === 'trilogy' ? 'BI case — no PIP envelope' : 'No coverage limit on file — underwrite first')
-      : envOk ? `${fmt$(env.remaining)} remaining after this bill` : `${fmt$(-env.remaining)} OVER coverage`,
+    key: 'envelope', label: env.basis === 'auth' ? 'Carrier authorization' : 'Coverage envelope', status: envOk ? 'pass' : 'fail',
+    detail: env.cap === 0
+      ? (caseType === 'trilogy' ? 'BI case — no carrier authorization or PIP envelope on file yet' : 'No coverage limit on file — underwrite first')
+      : envOk
+        ? `${fmt$(env.remaining)} of the ${env.basis === 'auth' ? 'carrier authorization' : 'coverage limit'} remaining`
+        : `${fmt$(-env.remaining)} OVER the ${env.basis === 'auth' ? 'carrier authorization' : 'coverage limit'}`,
   });
   // ③ billed ≤ contracted (carrier CPT prices)
   const rev = bill.revenue || 0;
@@ -127,10 +138,11 @@ export function caseHealth(p: any) {
   const overdue = (db.prepare('SELECT COUNT(*) c FROM tasks WHERE patientId=? AND due IS NOT NULL AND due<?').get(p.id, today) as any).c;
   if (overdue) { score -= Math.min(20, overdue * 5); reds.push({ kind: 'care', text: `${overdue} overdue task${overdue > 1 ? 's' : ''}` }); }
   const env = envelope(p.id);
-  if (env.limit > 0) {
-    const usedPct = (env.outside + env.usage) / env.limit * 100;
-    if (usedPct >= 100) { score -= 30; reds.push({ kind: 'cost', text: `${Math.round(usedPct)}% of coverage used — OVER` }); }
-    else if (usedPct >= 85) { score -= 20; reds.push({ kind: 'cost', text: `${Math.round(usedPct)}% of coverage used` }); }
+  if (env.cap > 0) {
+    const basisWord = env.basis === 'auth' ? 'carrier authorization' : 'coverage';
+    const usedPct = (env.basis === 'auth' ? env.usage : env.outside + env.usage) / env.cap * 100;
+    if (usedPct >= 100) { score -= 30; reds.push({ kind: 'cost', text: `${Math.round(usedPct)}% of ${basisWord} used — OVER` }); }
+    else if (usedPct >= 85) { score -= 20; reds.push({ kind: 'cost', text: `${Math.round(usedPct)}% of ${basisWord} used` }); }
   }
   if (p.attorneyRetained) { score -= 25; reds.push({ kind: 'legal', text: 'Attorney retained' }); }
   const upcoming = (db.prepare("SELECT COUNT(*) c FROM appointments WHERE patientId=? AND whenAt>=?").get(p.id, today) as any).c;
@@ -169,10 +181,10 @@ export function stripExtras(p: any) {
   }
   const env = envelope(p.id);
   let costVsPlan: string | null = null;
-  if (env.limit > 0 && p.doi) {
+  if (env.cap > 0 && p.doi) {
     const daysIn = Math.max(1, Math.floor((Date.now() - new Date(p.doi + 'T00:00:00').getTime()) / 86400000));
     const expectedPct = Math.min(100, daysIn / 90 * 100); // 90-day conservative course
-    const actualPct = (env.outside + env.usage) / env.limit * 100;
+    const actualPct = (env.basis === 'auth' ? env.usage : env.outside + env.usage) / env.cap * 100;
     costVsPlan = `${Math.round(actualPct)}% used vs ~${Math.round(expectedPct)}% expected`;
   }
   return { sol, solDays, costVsPlan, envelope: env };

@@ -61,6 +61,7 @@ export interface Patient extends PatientSummary {
   messages: CaseMessage[];
   appointments: { id: number; providerId: string | null; whenAt: string; note: string | null; createdBy: string }[];
   uw: { status: string; coverage: string; limit: number; riskFlags: string; approvedBy: string; outsideBills: OutsideBill[] };
+  carrierAuthorized?: number;
   notes: Note[]; tasks: Task[]; provLinks: ProvLink[]; bills: Bill[];
   receipts: Receipt[]; sentDocs: SentDoc[]; documents: PtDocument[];
 }
