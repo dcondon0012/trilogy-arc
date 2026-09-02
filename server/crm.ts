@@ -15,6 +15,7 @@
 import { Router } from 'express';
 import { db, audit, nowMST, nextId } from './db.js';
 import { requireAdmin, requireCrm } from './auth.js';
+import { placesReady, searchPlaces } from './integrations.js';
 
 export const CRM_STAGES = ['identify', 'outreach', 'conversation', 'meeting', 'proposal', 'signed', 'live'] as const;
 
@@ -177,12 +178,17 @@ const PHONE_RE = /(\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})/;
 const URL_RE = /((?:https?:\/\/)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/\S*)?)/i;
 const DROP_RE = /hospital|urgent care|dental|veterinar|emergency room/i;
 
-export function scoreProspect(p: { name: string; phone?: string | null; website?: string | null }) {
+export function scoreProspect(p: { name: string; phone?: string | null; website?: string | null; rating?: number | null; reviews?: number | null }) {
   let score = 35; const flags: string[] = [];
   if (p.website) { score += 15; } else flags.push('No website');
   if (p.phone) score += 10; else { score -= 10; flags.push('No phone'); }
   if (/injur|accident|auto|whiplash/i.test(p.name)) { score += 15; flags.push('Injury focused'); }
   if (/group|associates|institute|partners|clinics|centers/i.test(p.name)) { score += 12; flags.push('Group or multi site'); }
+  // From auto-search only: an established, well-reviewed practice is a better first call.
+  if (p.rating != null && p.reviews != null && p.reviews >= 20) {
+    if (p.rating >= 4.5) { score += 8; flags.push('Highly rated'); }
+    else if (p.rating < 3.5) { score -= 8; flags.push('Weak reviews'); }
+  }
   return { score: Math.max(0, Math.min(100, score)), flags };
 }
 
@@ -239,6 +245,33 @@ crm.post('/prospects/import', (req, res) => {
   }
   audit(req.user!, 'crm.prospects.import', 'crm', market, `${added} added, ${dupes} duplicates, ${dropped} out-of-scope`);
   res.json({ ok: true, added, dupes, dropped });
+});
+
+/* Auto-search: Google Places finds the market's practices; the same scoring,
+   scope filter, and dedupe as paste-in imports apply before anything lands. */
+crm.post('/prospects/search', async (req, res) => {
+  const market = String(req.body?.market || '').trim();
+  const specialty = String(req.body?.specialty || '').trim();
+  if (!market || !specialty) return res.status(400).json({ error: 'Market and specialty are both required — e.g. "Springfield, MO" + "Chiropractic"' });
+  if (!placesReady()) return res.status(503).json({ error: 'Auto-search needs the Google Places key — an admin can add it under Admin → Integrations' });
+  let hits;
+  try { hits = await searchPlaces(`${specialty} in ${market}`); }
+  catch (err: any) { return res.status(502).json({ error: 'Google Places said: ' + String(err?.message || err).slice(0, 160) }); }
+  const ins = db.prepare(`INSERT INTO crm_prospects(market,specialty,name,address,phone,website,score,flags,status,createdAt,by)
+    VALUES(?,?,?,?,?,?,?,?,'new',?,?)`);
+  let added = 0, dropped = 0, dupes = 0;
+  for (const h of hits) {
+    if (DROP_RE.test(h.name)) { dropped++; continue; }
+    const dup = db.prepare('SELECT 1 FROM crm_prospects WHERE lower(name)=lower(?) AND market=?').get(h.name, market)
+      || db.prepare('SELECT 1 FROM crm_targets WHERE lower(name)=lower(?)').get(h.name)
+      || db.prepare('SELECT 1 FROM providers WHERE lower(name)=lower(?)').get(h.name);
+    if (dup) { dupes++; continue; }
+    const { score, flags } = scoreProspect(h);
+    ins.run(market, specialty, h.name, h.address, h.phone, h.website, score, JSON.stringify(flags), nowMST(), req.user!.name);
+    added++;
+  }
+  audit(req.user!, 'crm.prospects.search', 'crm', market, `"${specialty}" · ${hits.length} found · ${added} added, ${dupes} known, ${dropped} out-of-scope`);
+  res.json({ ok: true, found: hits.length, added, dupes, dropped });
 });
 
 crm.post('/prospects/:id/add', (req, res) => {

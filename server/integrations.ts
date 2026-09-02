@@ -33,6 +33,7 @@ export const SECRET_KEYS = [
   'FAXAGE_USERNAME', 'FAXAGE_COMPANY', 'FAXAGE_PASSWORD',
   'ESIGN_VENDOR', 'ESIGN_API_KEY',
   'SENTRY_DSN',
+  'GOOGLE_MAPS_API_KEY',
 ] as const;
 
 const awsReady = () => !!(secret('AWS_ACCESS_KEY_ID') && secret('AWS_SECRET_ACCESS_KEY'));
@@ -63,6 +64,10 @@ export function integrationStatus() {
       needs: 'Same AWS keys as email — nothing extra.',
       keys: [],
       unlocks: 'Upload a bill → CPT lines, charges, and DOS fill themselves in' },
+    { key: 'places', name: 'Prospecting search (Google Places)', live: placesReady(),
+      needs: 'Google Cloud account (like AWS but Google) → enable "Places API (New)" → create an API key. Billing card required; free monthly allowance covers normal use.',
+      keys: ['GOOGLE_MAPS_API_KEY'],
+      unlocks: 'CRM Prospecting: "Find providers" searches a whole market (e.g. every chiropractor in Springfield MO) and drops scored candidates straight into triage' },
     { key: 'sentry', name: 'Error reporting (Sentry)', live: !!secret('SENTRY_DSN'),
       needs: 'Free sentry.io account → create a Node/Express project → paste the DSN it shows you.',
       keys: ['SENTRY_DSN'],
@@ -386,6 +391,48 @@ export async function parseBillFile(rawBytes: Buffer, mime?: string): Promise<Pa
   if (!total && expLines.length) total = Math.round(expLines.reduce((s, l) => s + l.charge * (l.units || 1), 0) * 100) / 100 || null;
   if (!dos && !total && !descr) return null;
   return { kind: 'invoice', dos, total, lines: [], descr };
+}
+
+/* ---------- prospecting search (Google Places API New) ---------- */
+export const placesReady = () => !!secret('GOOGLE_MAPS_API_KEY');
+
+export interface PlaceHit {
+  name: string; address: string | null; phone: string | null; website: string | null;
+  rating: number | null; reviews: number | null;
+}
+/** Text search, paged up to ~60 results. Throws on API errors (caller maps to a friendly message). */
+export async function searchPlaces(query: string, maxPages = 3): Promise<PlaceHit[]> {
+  const key = secret('GOOGLE_MAPS_API_KEY');
+  const out: PlaceHit[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': key,
+        // Field mask = what we pay for. Keep it to exactly what prospecting needs.
+        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,nextPageToken',
+      },
+      body: JSON.stringify({ textQuery: query, pageSize: 20, ...(pageToken ? { pageToken } : {}) }),
+    });
+    const d: any = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(d?.error?.message || `Google Places ${r.status}`);
+    for (const p of d?.places || []) {
+      out.push({
+        name: p.displayName?.text || '',
+        address: p.formattedAddress || null,
+        phone: p.nationalPhoneNumber || null,
+        website: p.websiteUri ? String(p.websiteUri).replace(/\/$/, '') : null,
+        rating: p.rating ?? null,
+        reviews: p.userRatingCount ?? null,
+      });
+    }
+    pageToken = d?.nextPageToken;
+    if (!pageToken) break;
+    await new Promise(res => setTimeout(res, 350));   // let the next page token settle
+  }
+  return out.filter(p => p.name);
 }
 
 /* ---------- error reporting (Sentry) — lazy-init; a no-op until a DSN is pasted ---------- */

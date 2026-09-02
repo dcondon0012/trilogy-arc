@@ -978,6 +978,10 @@ async function main() {
   assert(r.status === 200 && r.data.sent === false && r.data.status === 'queued', 'SES test email queues when email is dark');
   r = await call('POST', '/api/admin/integrations/fax/poll');
   assert(r.status === 503, 'fax poll reports not-configured without Faxage keys');
+  r = await call('POST', '/api/crm/prospects/search', { market: 'Springfield, MO', specialty: 'Chiropractic' });
+  assert(r.status === 503, 'prospect auto-search reports not-configured without the Places key');
+  r = await call('POST', '/api/crm/prospects/search', { market: '', specialty: '' });
+  assert(r.status === 400, 'prospect auto-search requires market + specialty');
 
   // put nicole back to coord123 through the same flow (keeps reruns clean)
   cookies = [];

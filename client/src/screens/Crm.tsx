@@ -302,6 +302,16 @@ function ProspectTab({ onOpen, reloadWs }: { onOpen: (id: number) => void; reloa
       setText(''); load(market.trim());
     } catch (e: any) { alert(e.message); }
   };
+  const [searching, setSearching] = useState(false);
+  const doSearch = async () => {
+    if (!market.trim() || !specialty.trim()) return alert('Fill in Market and Specialty first — that’s the search ("Chiropractic in Springfield, MO")');
+    setSearching(true);
+    try {
+      const r = await api('POST', '/crm/prospects/search', { market: market.trim(), specialty: specialty.trim() });
+      setLastImport(`Google found ${r.found} — ${r.added} added · ${r.dupes} already known · ${r.dropped} out-of-scope`);
+      load(market.trim());
+    } catch (e: any) { alert(e.message); } finally { setSearching(false); }
+  };
   const act = async (fn: () => Promise<any>) => { try { await fn(); load(market || undefined); reloadWs(); } catch (e: any) { alert(e.message); } };
   const list: any[] = data.prospects;
   const fresh = list.filter(p => p.status === 'new');
@@ -312,7 +322,8 @@ function ProspectTab({ onOpen, reloadWs }: { onOpen: (id: number) => void; reloa
     <div className="grid2">
       <div className="card">
         <div className="chead"><h3>Bring in candidates</h3>
-          <button className="btn sm" disabled title="Auto-search needs the Google Places integration — parked until API accounts exist">⌕ Find providers (soon)</button>
+          <button className="btn sm primary" disabled={searching} title="Searches Google for every matching practice in the market and scores them"
+            onClick={doSearch}>{searching ? 'Searching…' : '⌕ Find providers'}</button>
         </div>
         <div className="cbody">
           <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
@@ -365,7 +376,7 @@ function ProspectTab({ onOpen, reloadWs }: { onOpen: (id: number) => void; reloa
                 {p.status !== 'added' && <button className="btn sm" onClick={() => act(() => api('POST', `/crm/prospects/${p.id}/reject`))}>{p.status === 'rejected' ? 'Restore' : 'Not a fit'}</button>}
               </div>
             </div>))}
-          {!list.length && <div style={{ color: 'var(--muted)' }}>No candidates yet — paste a list on the left. Auto-search from Google arrives with the integrations.</div>}
+          {!list.length && <div style={{ color: 'var(--muted)' }}>No candidates yet — fill in Market + Specialty and hit Find providers, or paste a list on the left.</div>}
         </div>
       </div>
     </div>);
