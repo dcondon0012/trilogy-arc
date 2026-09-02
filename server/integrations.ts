@@ -45,7 +45,7 @@ export function integrationStatus() {
   return [
     { key: 'email', name: 'Email (AWS SES)', live: emailReady(), queued: q('email'),
       needs: 'AWS account → IAM access key + secret, region (us-west-2), and a verified From address. I set up domain verification and hand over the exact Porkbun DNS records once keys are in.',
-      keys: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'SES_FROM'],
+      keys: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'SES_FROM', 'SES_REPLY_TO'],
       unlocks: 'Auth documents emailed with the doc included · daily outbound & records chases actually send · password-reset and temp-code emails deliver · inbound email → Requests queue' },
     { key: 'sms', name: 'Texting (Twilio)', live: smsReady(), queued: q('sms'),
       needs: 'Twilio account + phone number + 10DLC registration (1–6 weeks — start early). Paste Account SID, Auth Token, and the From number.',
