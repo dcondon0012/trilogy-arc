@@ -94,11 +94,15 @@ export async function secretsMasked() {
 async function buildMime(m: Mail): Promise<Buffer> {
   // MailComposer handles headers, encoding, and attachments; SES just carries the bytes.
   const MailComposer = (await import('nodemailer/lib/mail-composer/index.js') as any).default;
-  return new Promise(async (resolve, reject) => {
-    // Replies follow the person: human-triggered sends carry the sender's email; system mail
-    // goes to the general inbox (SES_REPLY_TO — set it in Admin → Integrations once the
-    // shared mailbox exists; Donny's inbox is the fallback until then).
-    new MailComposer({ from: await secret('SES_FROM'), replyTo: m.replyTo || await secret('SES_REPLY_TO') || 'donny@trilogyconnections.com', to: m.to, subject: m.subject, text: m.text, html: m.html, attachments: m.attachments })
+  // Resolve secrets BEFORE the executor — an async Promise executor swallows its own
+  // rejections, so a throw inside would leave the promise hanging forever.
+  // Replies follow the person: human-triggered sends carry the sender's email; system mail
+  // goes to the general inbox (SES_REPLY_TO — set it in Admin → Integrations once the
+  // shared mailbox exists; Donny's inbox is the fallback until then).
+  const from = await secret('SES_FROM');
+  const replyTo = m.replyTo || await secret('SES_REPLY_TO') || 'donny@trilogyconnections.com';
+  return new Promise((resolve, reject) => {
+    new MailComposer({ from, replyTo, to: m.to, subject: m.subject, text: m.text, html: m.html, attachments: m.attachments })
       .compile().build((err: any, msg: Buffer) => (err ? reject(err) : resolve(msg)));
   });
 }

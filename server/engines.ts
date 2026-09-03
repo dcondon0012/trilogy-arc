@@ -283,7 +283,9 @@ export async function carrierReport(insurerId: string) {
   }
   const savings = Math.max(0, billedFace - contracted);
   const attyCount = pts.filter(p => p.attorneyRetained).length;
-  const vel = await q.get(`SELECT AVG(s2.at::date - s0.at::date) d FROM stage_times s0
+  // ::float — AVG over an integer (date diff) returns NUMERIC, which node-pg hands back
+  // as a string; AVG over float8 columns elsewhere is unaffected.
+  const vel = await q.get(`SELECT AVG(s2.at::date - s0.at::date)::float d FROM stage_times s0
     JOIN stage_times s2 ON s2.patientId=s0.patientId AND s2.stage=2
     JOIN patients p ON p.id=s0.patientId WHERE s0.stage=0 AND p.insurerId=?`, insurerId);
   const cfg = JSON.parse((await q.get('SELECT onboarding FROM insurers WHERE id=?', insurerId) as any)?.onboarding || '{}');
@@ -304,7 +306,7 @@ export async function outboundDrafts() {
   const drafts: any[] = [];
   // per provider: records chases + auth confirmations
   const byProv: Record<string, any[]> = {};
-  for (const b of await q.all(`SELECT b.*, pr.name prName, p.name ptName FROM bills b
+  for (const b of await q.all(`SELECT b.*, pr.name "prName", p.name "ptName" FROM bills b
     JOIN providers pr ON pr.id=b.providerId JOIN patients p ON p.id=b.patientId
     WHERE b.status='unpaid' AND b.voided=0 AND (b.hasBill=0 OR b.hasNote=0)`)) {
     (byProv[b.providerId] = byProv[b.providerId] || []).push(b);
@@ -321,7 +323,7 @@ export async function outboundDrafts() {
   // per carrier: aging receipts
   const byIns: Record<string, any[]> = {};
   const cutoff14 = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
-  for (const r of await q.all(`SELECT r.*, p.name ptName, p.insurerId, i.name insName FROM receipts r
+  for (const r of await q.all(`SELECT r.*, p.name "ptName", p.insurerId, i.name "insName" FROM receipts r
     JOIN patients p ON p.id=r.patientId JOIN insurers i ON i.id=p.insurerId
     WHERE r.status='Pending' AND r.voided=0 AND r.date<?`, cutoff14)) {
     (byIns[r.insurerId] = byIns[r.insurerId] || []).push(r);

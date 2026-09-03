@@ -258,7 +258,7 @@ export async function computeAndStore(refreshId: number, rvuRows: any[], gpciRow
     mp: num(g.gpci_mp),
   }));
   let count = 0;
-  await tx(async () => {
+  await tx(async c => {
     for (const [key, rows] of byKey) {
       const [cpt, modifier] = key.split('|');
       const pick = rows.slice().sort((a, b) => num(a.conv_fact) - num(b.conv_fact));
@@ -267,7 +267,7 @@ export async function computeAndStore(refreshId: number, rvuRows: any[], gpciRow
       const work = num(row.rvu_work), mp = num(row.rvu_mp);
       const peN = num(row.full_nfac_pe ?? row.nfac_pe), peF = num(row.full_fac_pe ?? row.fac_pe);
       for (const L of localities) {
-        await q.run(`INSERT INTO fee_rates(refreshId,cpt,modifier,locality,localityName,nonfacAmount,facAmount,convFact,
+        await c.run(`INSERT INTO fee_rates(refreshId,cpt,modifier,locality,localityName,nonfacAmount,facAmount,convFact,
           workRvu,nonfacPeRvu,facPeRvu,mpRvu,workGpci,peGpci,mpGpci,current)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
           refreshId, cpt, modifier, L.code, L.name,
@@ -282,10 +282,10 @@ export async function computeAndStore(refreshId: number, rvuRows: any[], gpciRow
 }
 
 export async function storeZips(refreshId: number, rows: Array<{ state: string; zip: string; carrier: string; locality: string; plus4: number }>) {
-  await tx(async () => {
-    await q.run('UPDATE fee_zips SET current=0 WHERE current=1');
+  await tx(async c => {
+    await c.run('UPDATE fee_zips SET current=0 WHERE current=1');
     for (const r of rows) {
-      await q.run('INSERT INTO fee_zips(refreshId,zip,state,carrier,locality,plus4,current) VALUES(?,?,?,?,?,?,1)',
+      await c.run('INSERT INTO fee_zips(refreshId,zip,state,carrier,locality,plus4,current) VALUES(?,?,?,?,?,?,1)',
         refreshId, r.zip, r.state, r.carrier, r.locality, r.plus4);
     }
   });
