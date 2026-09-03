@@ -17,7 +17,7 @@
  */
 import { Router } from 'express';
 import AdmZip from 'adm-zip';
-import { db, audit, nowMST } from './db.js';
+import { q, tx, audit, nowMST } from './db.js';
 import { requireAdmin, requireFees } from './auth.js';
 
 const PFS_API = 'https://pfs.data.cms.gov/api/1';
@@ -25,14 +25,14 @@ const CMS_FEE_PAGE = 'https://www.cms.gov/medicare/payment/fee-schedules';
 const UA = { 'User-Agent': 'TrilogyPlatform/1.0 (fee schedule sync; trilogyconnections.com)' };
 
 /* ---------- config / meta ---------- */
-const getMeta = (k: string) => (db.prepare('SELECT v FROM fee_meta WHERE k=?').get(k) as any)?.v ?? null;
-const setMeta = (k: string, v: string) => db.prepare('INSERT INTO fee_meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').run(k, v);
+const getMeta = async (k: string) => (await q.get('SELECT v FROM fee_meta WHERE k=?', k) as any)?.v ?? null;
+const setMeta = async (k: string, v: string) => await q.run('INSERT INTO fee_meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v', k, v);
 
-export const feeConfig = () => ({
-  benchmark: getMeta('benchmark') || 'medicare_pfs',      // swappable by design — see header
-  state: getMeta('state') || 'TX',
-  qualifyingApm: getMeta('qualifyingApm') === '1',        // network providers are not APM participants
-  workGpciFloor: getMeta('workGpciFloor') !== '0',        // statutory 1.00 floor — extended repeatedly, verify yearly
+export const feeConfig = async () => ({
+  benchmark: await getMeta('benchmark') || 'medicare_pfs',      // swappable by design — see header
+  state: await getMeta('state') || 'TX',
+  qualifyingApm: await getMeta('qualifyingApm') === '1',        // network providers are not APM participants
+  workGpciFloor: await getMeta('workGpciFloor') !== '0',        // statutory 1.00 floor — extended repeatedly, verify yearly
 });
 
 /* ---------- codes of interest (soft-tissue clinical scope) ---------- */
@@ -78,17 +78,18 @@ const DEFAULT_CODES: Array<[string, string, string, string, number]> = [
   // 20552/20553 (trigger point injections) removed 08/27/2026 — Donny ruled them
   // outside the soft-tissue-only clinical scope. Re-add via the admin panel if that changes.
 ];
-export function seedFeeCodes() {
-  if ((db.prepare('SELECT COUNT(*) c FROM fee_codes').get() as any).c === 0) {
-    const ins = db.prepare('INSERT INTO fee_codes(cpt,category,description,notes,review,active) VALUES(?,?,?,?,?,1)');
-    for (const [cpt, cat, desc, notes, review] of DEFAULT_CODES) ins.run(cpt, cat, desc, notes, review);
+export async function seedFeeCodes() {
+  if ((await q.get('SELECT COUNT(*) c FROM fee_codes') as any).c === 0) {
+    for (const [cpt, cat, desc, notes, review] of DEFAULT_CODES) {
+      await q.run('INSERT INTO fee_codes(cpt,category,description,notes,review,active) VALUES(?,?,?,?,?,1)', cpt, cat, desc, notes, review);
+    }
   }
   // One-time cleanup on databases seeded before the scope decision.
-  if (!db.prepare("SELECT 1 FROM counters WHERE k='mig_tpi_removed'").get()) {
-    db.prepare("DELETE FROM fee_codes WHERE cpt IN ('20552','20553')").run();
-    db.prepare("UPDATE fee_rates SET current=0 WHERE cpt IN ('20552','20553')").run();
-    db.prepare("INSERT INTO counters(k,v) VALUES('mig_tpi_removed',1)").run();
-    audit(null, 'fees.code.removed', 'fees', '20552,20553', 'Out of clinical scope — decision 08/27/2026');
+  if (!await q.get("SELECT 1 FROM counters WHERE k='mig_tpi_removed'")) {
+    await q.run("DELETE FROM fee_codes WHERE cpt IN ('20552','20553')");
+    await q.run("UPDATE fee_rates SET current=0 WHERE cpt IN ('20552','20553')");
+    await q.run("INSERT INTO counters(k,v) VALUES('mig_tpi_removed',1)");
+    await audit(null, 'fees.code.removed', 'fees', '20552,20553', 'Out of clinical scope — decision 08/27/2026');
   }
 }
 
@@ -240,8 +241,8 @@ export function computeAmount(cf: number, rvu: { work: number; pe: number; mp: n
 const num = (v: any) => { const n = parseFloat(String(v ?? '').replace(/[^0-9.eE+-]/g, '')); return Number.isFinite(n) ? n : 0; };
 
 /** Turn raw RVU + GPCI rows into stored fee_rates for one refresh. Pure of network. */
-export function computeAndStore(refreshId: number, rvuRows: any[], gpciRows: any[]): { rates: number; localities: number } {
-  const cfg = feeConfig();
+export async function computeAndStore(refreshId: number, rvuRows: any[], gpciRows: any[]): Promise<{ rates: number; localities: number }> {
+  const cfg = await feeConfig();
   // Group RVU rows by code+modifier; the dataset carries one row per conversion factor
   // (QP vs non-QP). Non-QP is always the lower CF — select by min/max, never hardcode.
   const byKey = new Map<string, any[]>();
@@ -256,11 +257,8 @@ export function computeAndStore(refreshId: number, rvuRows: any[], gpciRows: any
     pe: num(g.gpci_pe),
     mp: num(g.gpci_mp),
   }));
-  const ins = db.prepare(`INSERT INTO fee_rates(refreshId,cpt,modifier,locality,localityName,nonfacAmount,facAmount,convFact,
-    workRvu,nonfacPeRvu,facPeRvu,mpRvu,workGpci,peGpci,mpGpci,current)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`);
   let count = 0;
-  const write = db.transaction(() => {
+  await tx(async () => {
     for (const [key, rows] of byKey) {
       const [cpt, modifier] = key.split('|');
       const pick = rows.slice().sort((a, b) => num(a.conv_fact) - num(b.conv_fact));
@@ -269,7 +267,10 @@ export function computeAndStore(refreshId: number, rvuRows: any[], gpciRows: any
       const work = num(row.rvu_work), mp = num(row.rvu_mp);
       const peN = num(row.full_nfac_pe ?? row.nfac_pe), peF = num(row.full_fac_pe ?? row.fac_pe);
       for (const L of localities) {
-        ins.run(refreshId, cpt, modifier, L.code, L.name,
+        await q.run(`INSERT INTO fee_rates(refreshId,cpt,modifier,locality,localityName,nonfacAmount,facAmount,convFact,
+          workRvu,nonfacPeRvu,facPeRvu,mpRvu,workGpci,peGpci,mpGpci,current)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+          refreshId, cpt, modifier, L.code, L.name,
           computeAmount(cf, { work, pe: peN, mp }, L),
           computeAmount(cf, { work, pe: peF, mp }, L),
           cf, work, peN, peF, mp, L.work, L.pe, L.mp);
@@ -277,17 +278,17 @@ export function computeAndStore(refreshId: number, rvuRows: any[], gpciRows: any
       }
     }
   });
-  write();
   return { rates: count, localities: localities.length };
 }
 
-export function storeZips(refreshId: number, rows: Array<{ state: string; zip: string; carrier: string; locality: string; plus4: number }>) {
-  const ins = db.prepare('INSERT INTO fee_zips(refreshId,zip,state,carrier,locality,plus4,current) VALUES(?,?,?,?,?,?,1)');
-  const write = db.transaction(() => {
-    db.prepare('UPDATE fee_zips SET current=0 WHERE current=1').run();
-    for (const r of rows) ins.run(refreshId, r.zip, r.state, r.carrier, r.locality, r.plus4);
+export async function storeZips(refreshId: number, rows: Array<{ state: string; zip: string; carrier: string; locality: string; plus4: number }>) {
+  await tx(async () => {
+    await q.run('UPDATE fee_zips SET current=0 WHERE current=1');
+    for (const r of rows) {
+      await q.run('INSERT INTO fee_zips(refreshId,zip,state,carrier,locality,plus4,current) VALUES(?,?,?,?,?,?,1)',
+        refreshId, r.zip, r.state, r.carrier, r.locality, r.plus4);
+    }
   });
-  write();
 }
 
 /* ---------- the refresh pipeline ---------- */
@@ -296,11 +297,12 @@ export async function refreshFees(by: string): Promise<{ ok: boolean; detail: st
   if (refreshRunning) return { ok: false, detail: 'A refresh is already running' };
   refreshRunning = true;
   const year = new Date().getFullYear();
-  const info = db.prepare(`INSERT INTO fee_refreshes(at,by,source,year,status,detail) VALUES(?,?,?,?,'running','')`)
-    .run(nowMST(), by, feeConfig().benchmark, year);
+  const cfg = await feeConfig();
+  const info = await q.run(`INSERT INTO fee_refreshes(at,by,source,year,status,detail) VALUES(?,?,?,?,'running','')`,
+    nowMST(), by, cfg.benchmark, year);
   const refreshId = Number(info.lastInsertRowid);
   try {
-    const codes = (db.prepare('SELECT cpt FROM fee_codes WHERE active=1').all() as any[]).map(r => r.cpt);
+    const codes = (await q.all('SELECT cpt FROM fee_codes WHERE active=1')).map(r => r.cpt);
     if (!codes.length) throw new Error('No active codes configured');
     // Resolve this year's datasets live; fall back to last year's early in a new year
     // (CMS typically publishes the new year in Nov–Dec).
@@ -316,19 +318,19 @@ export async function refreshFees(by: string): Promise<{ ok: boolean; detail: st
     const missing = codes.filter(c => !found.has(c));
     const cw = await fetchZipCrosswalk();
 
-    db.prepare('UPDATE fee_rates SET current=0 WHERE current=1').run();
-    const { rates, localities } = computeAndStore(refreshId, rvuRows, gpciRows);
-    storeZips(refreshId, cw.rows);
+    await q.run('UPDATE fee_rates SET current=0 WHERE current=1');
+    const { rates, localities } = await computeAndStore(refreshId, rvuRows, gpciRows);
+    await storeZips(refreshId, cw.rows);
     const detail = `Indicators ${usedYear} · Localities ${usedYear} · ${cw.fileName}` + (missing.length ? ` · MISSING codes: ${missing.join(', ')}` : '');
-    db.prepare(`UPDATE fee_refreshes SET status='ok', detail=?, rvuDataset=?, gpciDataset=?, zipFile=?, year=?, codes=?, localities=?, zips=? WHERE id=?`)
-      .run(detail, rvuDs, gpciDs, cw.fileName, usedYear, found.size, localities, cw.rows.length, refreshId);
-    setMeta('lastOkAt', new Date().toISOString());
-    audit(null, 'fees.refresh.ok', 'fees', String(refreshId), detail);
+    await q.run(`UPDATE fee_refreshes SET status='ok', detail=?, rvuDataset=?, gpciDataset=?, zipFile=?, year=?, codes=?, localities=?, zips=? WHERE id=?`,
+      detail, rvuDs, gpciDs, cw.fileName, usedYear, found.size, localities, cw.rows.length, refreshId);
+    await setMeta('lastOkAt', new Date().toISOString());
+    await audit(null, 'fees.refresh.ok', 'fees', String(refreshId), detail);
     return { ok: true, detail };
   } catch (err: any) {
     const detail = String(err?.message || err);
-    db.prepare(`UPDATE fee_refreshes SET status='failed', detail=? WHERE id=?`).run(detail, refreshId);
-    audit(null, 'fees.refresh.failed', 'fees', String(refreshId), detail);
+    await q.run(`UPDATE fee_refreshes SET status='failed', detail=? WHERE id=?`, detail, refreshId);
+    await audit(null, 'fees.refresh.failed', 'fees', String(refreshId), detail);
     return { ok: false, detail };
   } finally {
     refreshRunning = false;
@@ -340,8 +342,8 @@ export async function refreshFees(by: string): Promise<{ ok: boolean; detail: st
 export function scheduleFeeRefresh() {
   if (process.env.NODE_ENV !== 'production' || process.env.TRILOGY_FEES_NO_AUTO === '1') return;
   const staleDays = 7;
-  const check = () => {
-    const last = getMeta('lastOkAt');
+  const check = async () => {
+    const last = await getMeta('lastOkAt');
     if (last && Date.now() - new Date(last).getTime() < staleDays * 86400000) return;
     refreshFees('scheduler').then(r => console.log('[fees] scheduled refresh:', r.ok ? 'ok' : 'FAILED', '—', r.detail))
       .catch(e => console.log('[fees] scheduled refresh crashed:', e));
@@ -351,49 +353,50 @@ export function scheduleFeeRefresh() {
 }
 
 /* ---------- queries ---------- */
-export function feeStatus() {
-  const cfg = feeConfig();
-  const last = db.prepare(`SELECT * FROM fee_refreshes ORDER BY id DESC LIMIT 8`).all() as any[];
-  const lastOk = db.prepare(`SELECT * FROM fee_refreshes WHERE status='ok' ORDER BY id DESC LIMIT 1`).get() as any;
+export async function feeStatus() {
+  const cfg = await feeConfig();
+  const last = await q.all(`SELECT * FROM fee_refreshes ORDER BY id DESC LIMIT 8`);
+  const lastOk = await q.get(`SELECT * FROM fee_refreshes WHERE status='ok' ORDER BY id DESC LIMIT 1`);
   return {
     benchmark: cfg.benchmark, state: cfg.state,
     qualifyingApm: cfg.qualifyingApm, workGpciFloor: cfg.workGpciFloor,
-    currentRates: (db.prepare('SELECT COUNT(*) c FROM fee_rates WHERE current=1').get() as any).c,
-    currentZips: (db.prepare('SELECT COUNT(*) c FROM fee_zips WHERE current=1').get() as any).c,
+    currentRates: (await q.get('SELECT COUNT(*) c FROM fee_rates WHERE current=1') as any).c,
+    currentZips: (await q.get('SELECT COUNT(*) c FROM fee_zips WHERE current=1') as any).c,
     lastOk: lastOk || null, history: last,
-    codes: db.prepare('SELECT * FROM fee_codes ORDER BY category, cpt').all(),
+    codes: await q.all('SELECT * FROM fee_codes ORDER BY category, cpt'),
   };
 }
 
-export function feeLookup(zip?: string, cpt?: string) {
+export async function feeLookup(zip?: string, cpt?: string) {
   const z = String(zip || '').replace(/\D/g, '').slice(0, 5);
   let loc: any = null;
-  if (z) loc = db.prepare('SELECT * FROM fee_zips WHERE zip=? AND current=1 LIMIT 1').get(z);
+  if (z) loc = await q.get('SELECT * FROM fee_zips WHERE zip=? AND current=1 LIMIT 1', z);
   const where: string[] = ['r.current=1'];
   const args: any[] = [];
   if (loc) { where.push('r.locality=?'); args.push(loc.locality); }
   if (cpt) { where.push('r.cpt=?'); args.push(String(cpt).trim()); }
-  const rates = db.prepare(`SELECT r.*, c.category, c.description, c.notes, c.review
+  const rates = await q.all(`SELECT r.*, c.category, c.description, c.notes, c.review
     FROM fee_rates r LEFT JOIN fee_codes c ON c.cpt=r.cpt
-    WHERE ${where.join(' AND ')} ORDER BY c.category, r.cpt, r.modifier, r.localityName`).all(...args) as any[];
-  const lastOk = db.prepare(`SELECT at, year, detail, zipFile FROM fee_refreshes WHERE status='ok' ORDER BY id DESC LIMIT 1`).get() as any;
+    WHERE ${where.join(' AND ')} ORDER BY c.category, r.cpt, r.modifier, r.localityName`, ...args);
+  const lastOk = await q.get(`SELECT at, year, detail, zipFile FROM fee_refreshes WHERE status='ok' ORDER BY id DESC LIMIT 1`);
+  const cfg = await feeConfig();
   return {
     zip: z || null,
     locality: loc ? { code: loc.locality, plus4: !!loc.plus4 } : null,
     zipKnown: z ? !!loc : null,
-    rates, source: lastOk || null, benchmark: feeConfig().benchmark,
+    rates, source: lastOk || null, benchmark: cfg.benchmark,
   };
 }
 
 /** Current Medicare non-facility amount for one CPT at one ZIP (global modifier row).
  *  Used by the per-case margins engine. Null when the ZIP or code isn't loaded. */
-export function medicareFor(zip: string, cpt: string): number | null {
+export async function medicareFor(zip: string, cpt: string): Promise<number | null> {
   const z = String(zip || '').replace(/\D/g, '').slice(0, 5);
   if (!z) return null;
-  const loc = db.prepare('SELECT locality FROM fee_zips WHERE zip=? AND current=1 LIMIT 1').get(z) as any;
+  const loc = await q.get('SELECT locality FROM fee_zips WHERE zip=? AND current=1 LIMIT 1', z);
   if (!loc) return null;
-  const r = db.prepare("SELECT nonfacAmount FROM fee_rates WHERE current=1 AND cpt=? AND modifier='' AND locality=? LIMIT 1")
-    .get(String(cpt).trim(), loc.locality) as any;
+  const r = await q.get("SELECT nonfacAmount FROM fee_rates WHERE current=1 AND cpt=? AND modifier='' AND locality=? LIMIT 1",
+    String(cpt).trim(), loc.locality);
   return r?.nonfacAmount ?? null;
 }
 
@@ -402,67 +405,68 @@ export const fees = Router();
 // requireAuth is applied at mount; this router adds the fee-tool gate.
 fees.use(requireFees);
 
-fees.get('/status', (_req, res) => res.json(feeStatus()));
-fees.get('/lookup', (req, res) => res.json(feeLookup(String(req.query.zip || ''), String(req.query.cpt || ''))));
+fees.get('/status', async (_req, res) => res.json(await feeStatus()));
+fees.get('/lookup', async (req, res) => res.json(await feeLookup(String(req.query.zip || ''), String(req.query.cpt || ''))));
 
-fees.post('/admin/refresh', requireAdmin, (req, res) => {
-  audit(req.user!, 'fees.refresh.start', 'fees', undefined, 'manual');
+fees.post('/admin/refresh', requireAdmin, async (req, res) => {
+  await audit(req.user!, 'fees.refresh.start', 'fees', undefined, 'manual');
   // Fire async — the pipeline can take a minute; the UI polls /status.
   refreshFees(req.user!.name).catch(() => { /* recorded in fee_refreshes */ });
   res.json({ ok: true, started: true });
 });
 
-fees.post('/admin/codes', requireAdmin, (req, res) => {
+fees.post('/admin/codes', requireAdmin, async (req, res) => {
   const { cpt, category, description, notes, review, active } = req.body || {};
   const code = String(cpt || '').trim().toUpperCase();
   if (!/^[A-Z0-9]{4,5}$/.test(code)) return res.status(400).json({ error: 'CPT/HCPCS code required (4–5 characters)' });
-  db.prepare(`INSERT INTO fee_codes(cpt,category,description,notes,review,active) VALUES(?,?,?,?,?,?)
+  await q.run(`INSERT INTO fee_codes(cpt,category,description,notes,review,active) VALUES(?,?,?,?,?,?)
     ON CONFLICT(cpt) DO UPDATE SET category=excluded.category, description=excluded.description,
-    notes=excluded.notes, review=excluded.review, active=excluded.active`)
-    .run(code, String(category || '').trim() || 'Other', String(description || '').trim(),
-      String(notes || '').trim(), review ? 1 : 0, active === 0 || active === false ? 0 : 1);
-  audit(req.user!, 'fees.code.set', 'fees', code, description);
-  res.json({ ok: true, codes: db.prepare('SELECT * FROM fee_codes ORDER BY category, cpt').all() });
+    notes=excluded.notes, review=excluded.review, active=excluded.active`,
+    code, String(category || '').trim() || 'Other', String(description || '').trim(),
+    String(notes || '').trim(), review ? 1 : 0, active === 0 || active === false ? 0 : 1);
+  await audit(req.user!, 'fees.code.set', 'fees', code, description);
+  res.json({ ok: true, codes: await q.all('SELECT * FROM fee_codes ORDER BY category, cpt') });
 });
 
-fees.post('/admin/codes/:cpt/review', requireAdmin, (req, res) => {
+fees.post('/admin/codes/:cpt/review', requireAdmin, async (req, res) => {
   const code = String(req.params.cpt).trim().toUpperCase();
-  const row = db.prepare('SELECT * FROM fee_codes WHERE cpt=?').get(code) as any;
+  const row = await q.get('SELECT * FROM fee_codes WHERE cpt=?', code);
   if (!row) return res.status(404).json({ error: 'Unknown code' });
   const cleared = req.body?.cleared !== false;
-  db.prepare('UPDATE fee_codes SET review=?, notes=? WHERE cpt=?')
-    .run(cleared ? 0 : 1, cleared ? `Scope confirmed by ${req.user!.name} ${nowMST()}` : row.notes, code);
-  audit(req.user!, cleared ? 'fees.code.reviewCleared' : 'fees.code.reviewFlagged', 'fees', code);
+  await q.run('UPDATE fee_codes SET review=?, notes=? WHERE cpt=?',
+    cleared ? 0 : 1, cleared ? `Scope confirmed by ${req.user!.name} ${nowMST()}` : row.notes, code);
+  await audit(req.user!, cleared ? 'fees.code.reviewCleared' : 'fees.code.reviewFlagged', 'fees', code);
   res.json({ ok: true });
 });
 
 /** Manual crosswalk upload — the escape hatch if CMS changes their page/file format. */
-fees.post('/admin/zip-upload', requireAdmin, (req, res) => {
+fees.post('/admin/zip-upload', requireAdmin, async (req, res) => {
   const text = String(req.body?.text || '');
   if (!text.trim()) return res.status(400).json({ error: 'Paste the crosswalk CSV content' });
   const rows = parseCrosswalk(text);
   if (!rows.length) return res.status(400).json({ error: 'No Texas rows recognized — expected columns STATE, ZIP CODE, CARRIER, LOCALITY' });
-  const info = db.prepare(`INSERT INTO fee_refreshes(at,by,source,year,status,detail,zips) VALUES(?,?,?,?,'ok',?,?)`)
-    .run(nowMST(), req.user!.name, feeConfig().benchmark, new Date().getFullYear(), 'Manual ZIP crosswalk upload', rows.length);
-  storeZips(Number(info.lastInsertRowid), rows);
-  audit(req.user!, 'fees.zipUpload', 'fees', String(info.lastInsertRowid), `${rows.length} TX zips`);
+  const cfg = await feeConfig();
+  const info = await q.run(`INSERT INTO fee_refreshes(at,by,source,year,status,detail,zips) VALUES(?,?,?,?,'ok',?,?)`,
+    nowMST(), req.user!.name, cfg.benchmark, new Date().getFullYear(), 'Manual ZIP crosswalk upload', rows.length);
+  await storeZips(Number(info.lastInsertRowid), rows);
+  await audit(req.user!, 'fees.zipUpload', 'fees', String(info.lastInsertRowid), `${rows.length} TX zips`);
   res.json({ ok: true, zips: rows.length });
 });
 
 /* Test-only fixture loader — compiled out of reach in production. */
 if (process.env.NODE_ENV !== 'production') {
-  fees.post('/test/fixture', requireAdmin, (req, res) => {
+  fees.post('/test/fixture', requireAdmin, async (req, res) => {
     const { rvu, gpci, zips } = req.body || {};
     if (!Array.isArray(rvu) || !Array.isArray(gpci)) return res.status(400).json({ error: 'rvu and gpci arrays required' });
-    const info = db.prepare(`INSERT INTO fee_refreshes(at,by,source,year,status,detail) VALUES(?,?,?,?,'ok','test fixture')`)
-      .run(nowMST(), 'test', 'medicare_pfs', 2026);
+    const info = await q.run(`INSERT INTO fee_refreshes(at,by,source,year,status,detail) VALUES(?,?,?,?,'ok','test fixture')`,
+      nowMST(), 'test', 'medicare_pfs', 2026);
     const refreshId = Number(info.lastInsertRowid);
-    db.prepare('UPDATE fee_rates SET current=0 WHERE current=1').run();
-    const r = computeAndStore(refreshId, rvu, gpci);
-    if (Array.isArray(zips) && zips.length) storeZips(refreshId, zips);
-    db.prepare('UPDATE fee_refreshes SET codes=?, localities=?, zips=? WHERE id=?')
-      .run(new Set(rvu.map((x: any) => x.hcpc)).size, r.localities, (zips || []).length, refreshId);
-    setMeta('lastOkAt', new Date().toISOString());
+    await q.run('UPDATE fee_rates SET current=0 WHERE current=1');
+    const r = await computeAndStore(refreshId, rvu, gpci);
+    if (Array.isArray(zips) && zips.length) await storeZips(refreshId, zips);
+    await q.run('UPDATE fee_refreshes SET codes=?, localities=?, zips=? WHERE id=?',
+      new Set(rvu.map((x: any) => x.hcpc)).size, r.localities, (zips || []).length, refreshId);
+    await setMeta('lastOkAt', new Date().toISOString());
     res.json({ ok: true, ...r });
   });
 }
