@@ -11,7 +11,7 @@
  *    · background batch resolution: /geo/batch returns what's cached now and a
  *      pending count; the client polls while the queue drains.
  */
-import { db, nowMST } from './db.js';
+import { q, nowMST } from './db.js';
 
 const GEO_UA = { 'User-Agent': 'TrilogyPlatform/1.0 (internal provider map; trilogyconnections.com)' };
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
@@ -58,8 +58,8 @@ function variants(addr: string): Array<{ q: string; approx: GeoResult['approx'] 
 }
 
 const STALE_NOTFOUND_DAYS = 7;
-function cached(key: string): { hit: boolean; res: GeoResult | null } {
-  const row = db.prepare('SELECT lat, lon, approx, at FROM geo_cache WHERE k=?').get(key) as any;
+async function cached(key: string): Promise<{ hit: boolean; res: GeoResult | null }> {
+  const row = await q.get<any>('SELECT lat, lon, approx, at FROM geo_cache WHERE k=?', key);
   if (!row) return { hit: false, res: null };
   if (row.lat == null) {
     // known not-found — honor it for a week, then let it retry (addresses get fixed)
@@ -73,31 +73,33 @@ function cached(key: string): { hit: boolean; res: GeoResult | null } {
 export async function geocode(addr: string): Promise<GeoResult | null> {
   const key = norm(addr);
   if (!key) return null;
-  const c = cached(key);
+  const c = await cached(key);
   if (c.hit) return c.res;
   for (const v of variants(addr)) {
     try {
       const hit = await nominatim(v.q);
       if (hit) {
-        db.prepare('INSERT OR REPLACE INTO geo_cache(k,lat,lon,approx,at) VALUES(?,?,?,?,?)')
-          .run(key, hit.lat, hit.lon, v.approx, nowMST());
+        // Stage 3 fix: INSERT OR REPLACE → explicit ON CONFLICT
+        await q.run('INSERT INTO geo_cache(k,lat,lon,approx,at) VALUES(?,?,?,?,?) ON CONFLICT(k) DO UPDATE SET lat=excluded.lat, lon=excluded.lon, approx=excluded.approx, at=excluded.at',
+          key, hit.lat, hit.lon, v.approx, nowMST());
         return { ...hit, approx: v.approx };
       }
     } catch { /* rate limit / outage — try the next variant; do NOT cache a failure */ return null; }
   }
-  db.prepare('INSERT OR REPLACE INTO geo_cache(k,lat,lon,approx,at) VALUES(?,NULL,NULL,?,?)')
-    .run(key, 'notfound', nowMST());
+  // Stage 3 fix: INSERT OR REPLACE → explicit ON CONFLICT
+  await q.run('INSERT INTO geo_cache(k,lat,lon,approx,at) VALUES(?,NULL,NULL,?,?) ON CONFLICT(k) DO UPDATE SET lat=NULL, lon=NULL, approx=excluded.approx, at=excluded.at',
+    key, 'notfound', nowMST());
   return null;
 }
 
 /* ---------- background batch: answer from cache, queue the rest ---------- */
 const inflight = new Set<string>();
-export function geoBatch(addresses: string[]): { results: Record<string, GeoResult | null>; pending: number } {
+export async function geoBatch(addresses: string[]): Promise<{ results: Record<string, GeoResult | null>; pending: number }> {
   const results: Record<string, GeoResult | null> = {};
   let pending = 0;
   for (const a of [...new Set(addresses.map(x => String(x || '')).filter(Boolean))].slice(0, 200)) {
     const key = norm(a);
-    const c = cached(key);
+    const c = await cached(key);
     if (c.hit) { results[a] = c.res; continue; }
     pending++;
     if (!inflight.has(key)) {
@@ -112,14 +114,16 @@ export function geoBatch(addresses: string[]): { results: Record<string, GeoResu
 export async function route(flat: number, flon: number, tlat: number, tlon: number):
   Promise<{ seconds: number; meters: number } | null> {
   const key = [flat, flon, tlat, tlon].map(x => Number(x).toFixed(4)).join(',');
-  const hit = db.prepare('SELECT seconds, meters FROM route_cache WHERE k=?').get(key) as any;
+  const hit = await q.get<any>('SELECT seconds, meters FROM route_cache WHERE k=?', key);
   if (hit) return { seconds: hit.seconds, meters: hit.meters };
   try {
     const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${flon},${flat};${tlon},${tlat}?overview=false`, { headers: GEO_UA });
     const d: any = await r.json();
     const rt = d?.routes?.[0];
     if (!rt) return null;
-    db.prepare('INSERT OR REPLACE INTO route_cache(k,seconds,meters,at) VALUES(?,?,?,?)').run(key, rt.duration, rt.distance, nowMST());
+    // Stage 3 fix: INSERT OR REPLACE → explicit ON CONFLICT
+    await q.run('INSERT INTO route_cache(k,seconds,meters,at) VALUES(?,?,?,?) ON CONFLICT(k) DO UPDATE SET seconds=excluded.seconds, meters=excluded.meters, at=excluded.at',
+      key, rt.duration, rt.distance, nowMST());
     return { seconds: rt.duration, meters: rt.distance };
   } catch { return null; }
 }

@@ -16,19 +16,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
-import { db, UPLOAD_DIR } from './db.js';
+import { q, UPLOAD_DIR } from './db.js';
 
-function bucket(): string {
+async function bucket(): Promise<string> {
   if (process.env.S3_UPLOADS_BUCKET) return process.env.S3_UPLOADS_BUCKET;
-  try { return (db.prepare('SELECT v FROM secrets WHERE k=?').get('S3_UPLOADS_BUCKET') as any)?.v || ''; }
+  try { return (await q.get<any>('SELECT v FROM secrets WHERE k=?', 'S3_UPLOADS_BUCKET'))?.v || ''; }
   catch { return ''; }
 }
-export const storageMode = (): 'local' | 's3' => (bucket() ? 's3' : 'local');
+export const storageMode = async (): Promise<'local' | 's3'> => (await bucket() ? 's3' : 'local');
 
 let s3: any = null;
 let s3Bucket = '';
 async function client() {
-  const b = bucket();
+  const b = await bucket();
   if (s3 && s3Bucket === b) return s3;
   const { S3Client } = await import('@aws-sdk/client-s3');
   // Credentials come from the task role on AWS (default provider chain) — no keys in code.
@@ -40,19 +40,19 @@ const key = (id: string) => `uploads/${id}`;
 
 /** Write a file by id (webhook + fax intake use this directly). */
 export async function putFile(id: string, data: Buffer): Promise<void> {
-  if (storageMode() === 'local') { fs.writeFileSync(path.join(UPLOAD_DIR, id), data); return; }
+  if (await storageMode() === 'local') { fs.writeFileSync(path.join(UPLOAD_DIR, id), data); return; }
   const { PutObjectCommand } = await import('@aws-sdk/client-s3');
-  await (await client()).send(new PutObjectCommand({ Bucket: bucket(), Key: key(id), Body: data }));
+  await (await client()).send(new PutObjectCommand({ Bucket: await bucket(), Key: key(id), Body: data }));
 }
 
 /** Open a stored file as a stream, or null if it exists nowhere. Local always wins. */
 export async function openStored(id: string): Promise<Readable | null> {
   const p = path.join(UPLOAD_DIR, id);
   if (fs.existsSync(p)) return fs.createReadStream(p);
-  if (storageMode() === 'local') return null;
+  if (await storageMode() === 'local') return null;
   try {
     const { GetObjectCommand } = await import('@aws-sdk/client-s3');
-    const r: any = await (await client()).send(new GetObjectCommand({ Bucket: bucket(), Key: key(id) }));
+    const r: any = await (await client()).send(new GetObjectCommand({ Bucket: await bucket(), Key: key(id) }));
     return r.Body as Readable;
   } catch { return null; }
 }
@@ -75,7 +75,7 @@ export async function persistUploads(req: any, res: any, next: any) {
       ...(Array.isArray(req.files) ? req.files : []),
       ...(req.files && !Array.isArray(req.files) ? Object.values(req.files as Record<string, any[]>).flat() : []),
     ];
-    if (storageMode() === 's3') {
+    if (await storageMode() === 's3') {
       for (const f of files) {
         await putFile(f.filename, fs.readFileSync(f.path));
         try { fs.unlinkSync(f.path); } catch { /* scratch cleanup only */ }
