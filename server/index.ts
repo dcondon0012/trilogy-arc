@@ -83,7 +83,7 @@ app.post('/api/auth/change-password', requireAuth, changePassword);
 app.post('/api/auth/forgot-password', forgotPassword);   // pre-auth by design: emails a 30-min reset link, never reveals whether the address exists
 app.post('/api/auth/reset-password', resetPassword);
 app.get('/api/auth/me', async (req, res) => {
-  const u = currentUser(req);
+  const u = await currentUser(req);
   if (!u) return res.status(401).json({ error: 'Not signed in' });
   const row = await q.get<any>('SELECT mustChangePw FROM users WHERE id=?', u.id);
   res.json({ user: { ...u, mustChangePw: !!row?.mustChangePw } });
