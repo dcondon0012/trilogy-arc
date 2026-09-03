@@ -14,16 +14,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { db, nowMST, audit, DATA_DIR } from './db.js';
+import { q, tx, nowMST, audit, DATA_DIR } from './db.js';
 import { putFile } from './storage.js';
 
 /* ---------- secrets: env wins, then the admin-entered table ---------- */
-export function secret(k: string): string {
-  return process.env[k] || (db.prepare('SELECT v FROM secrets WHERE k=?').get(k) as any)?.v || '';
+export async function secret(k: string): Promise<string> {
+  return process.env[k] || (await q.get('SELECT v FROM secrets WHERE k=?', k) as any)?.v || '';
 }
-export function setSecret(k: string, v: string, by: string) {
-  db.prepare('INSERT INTO secrets(k,v,updatedAt,updatedBy) VALUES(?,?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updatedAt=excluded.updatedAt, updatedBy=excluded.updatedBy')
-    .run(k, v, nowMST(), by);
+export async function setSecret(k: string, v: string, by: string) {
+  await q.run('INSERT INTO secrets(k,v,updatedAt,updatedBy) VALUES(?,?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updatedAt=excluded.updatedAt, updatedBy=excluded.updatedBy',
+    k, v, nowMST(), by);
 }
 const mask = (v: string) => (v ? (v.length > 8 ? '••••' + v.slice(-4) : '••••') : '');
 
@@ -37,39 +37,39 @@ export const SECRET_KEYS = [
   'GOOGLE_MAPS_API_KEY',
 ] as const;
 
-const awsReady = () => !!(secret('AWS_ACCESS_KEY_ID') && secret('AWS_SECRET_ACCESS_KEY'));
-export const emailReady = () => awsReady() && !!secret('SES_FROM');
-export const smsReady = () => !!(secret('TWILIO_ACCOUNT_SID') && secret('TWILIO_AUTH_TOKEN') && secret('TWILIO_FROM'));
+const awsReady = async () => !!(await secret('AWS_ACCESS_KEY_ID') && await secret('AWS_SECRET_ACCESS_KEY'));
+export const emailReady = async () => await awsReady() && !!await secret('SES_FROM');
+export const smsReady = async () => !!(await secret('TWILIO_ACCOUNT_SID') && await secret('TWILIO_AUTH_TOKEN') && await secret('TWILIO_FROM'));
 export const ocrReady = awsReady;
 
-export function integrationStatus() {
-  const q = (kind: string) => (db.prepare("SELECT COUNT(*) c FROM outbox WHERE kind=? AND status='queued'").get(kind) as any).c;
+export async function integrationStatus() {
+  const countQueued = async (kind: string) => (await q.get("SELECT COUNT(*) c FROM outbox WHERE kind=? AND status='queued'", kind) as any).c;
   return [
-    { key: 'email', name: 'Email (AWS SES)', live: emailReady(), queued: q('email'),
+    { key: 'email', name: 'Email (AWS SES)', live: await emailReady(), queued: await countQueued('email'),
       needs: 'AWS account → IAM access key + secret, region (us-west-2), and a verified From address. I set up domain verification and hand over the exact Porkbun DNS records once keys are in.',
       keys: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'SES_FROM', 'SES_REPLY_TO'],
       unlocks: 'Auth documents emailed with the doc included · daily outbound & records chases actually send · password-reset and temp-code emails deliver · inbound email → Requests queue' },
-    { key: 'sms', name: 'Texting (Twilio)', live: smsReady(), queued: q('sms'),
+    { key: 'sms', name: 'Texting (Twilio)', live: await smsReady(), queued: await countQueued('sms'),
       needs: 'Twilio account + phone number + 10DLC registration (1–6 weeks — start early). Paste Account SID, Auth Token, and the From number.',
       keys: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM'],
       unlocks: 'Post-appointment patient check-ins (no PHI in messages)' },
-    { key: 'fax', name: 'Fax (Faxage)', live: !!(secret('FAXAGE_USERNAME') && secret('FAXAGE_PASSWORD')), queued: q('fax'),
+    { key: 'fax', name: 'Fax (Faxage)', live: !!(await secret('FAXAGE_USERNAME') && await secret('FAXAGE_PASSWORD')), queued: await countQueued('fax'),
       needs: 'Faxage account (Professional plan ~$8/mo, sign their BAA). Paste username, company id, and password.',
       keys: ['FAXAGE_USERNAME', 'FAXAGE_COMPANY', 'FAXAGE_PASSWORD'],
       unlocks: 'Inbound faxes to the Trilogy fax number are pulled into the Requests queue automatically (checked every 5 minutes)' },
-    { key: 'esign', name: 'E-signature', live: !!secret('ESIGN_API_KEY'),
+    { key: 'esign', name: 'E-signature', live: !!await secret('ESIGN_API_KEY'),
       needs: 'Vendor decision (pay-per-document with a BAA recommended) + API key. Also gated on counsel clearing the contract templates.',
       keys: ['ESIGN_VENDOR', 'ESIGN_API_KEY'],
       unlocks: 'Contracts go out for real signing; status flips itself when signed' },
-    { key: 'ocr', name: 'Bill reading (AWS Textract)', live: ocrReady(),
+    { key: 'ocr', name: 'Bill reading (AWS Textract)', live: await ocrReady(),
       needs: 'Same AWS keys as email — nothing extra.',
       keys: [],
       unlocks: 'Upload a bill → CPT lines, charges, and DOS fill themselves in' },
-    { key: 'places', name: 'Prospecting search (Google Places)', live: placesReady(),
+    { key: 'places', name: 'Prospecting search (Google Places)', live: await placesReady(),
       needs: 'Google Cloud account (like AWS but Google) → enable "Places API (New)" → create an API key. Billing card required; free monthly allowance covers normal use.',
       keys: ['GOOGLE_MAPS_API_KEY'],
       unlocks: 'CRM Prospecting: "Find providers" searches a whole market (e.g. every chiropractor in Springfield MO) and drops scored candidates straight into triage' },
-    { key: 'sentry', name: 'Error reporting (Sentry)', live: !!secret('SENTRY_DSN'),
+    { key: 'sentry', name: 'Error reporting (Sentry)', live: !!await secret('SENTRY_DSN'),
       needs: 'Free sentry.io account → create a Node/Express project → paste the DSN it shows you.',
       keys: ['SENTRY_DSN'],
       unlocks: 'The app reports its own crashes and server errors with the exact cause — no waiting for someone to notice and screenshot it' },
@@ -80,31 +80,33 @@ export function integrationStatus() {
   ];
 }
 
-export function secretsMasked() {
-  return SECRET_KEYS.map(k => {
-    const row = db.prepare('SELECT v, updatedAt, updatedBy FROM secrets WHERE k=?').get(k) as any;
+export async function secretsMasked() {
+  const results = [];
+  for (const k of SECRET_KEYS) {
+    const row = await q.get('SELECT v, updatedAt, updatedBy FROM secrets WHERE k=?', k) as any;
     const envSet = !!process.env[k];
-    return { key: k, set: envSet || !!row?.v, masked: envSet ? '(set on server)' : mask(row?.v || ''), updatedAt: row?.updatedAt || null };
-  });
+    results.push({ key: k, set: envSet || !!row?.v, masked: envSet ? '(set on server)' : mask(row?.v || ''), updatedAt: row?.updatedAt || null });
+  }
+  return results;
 }
 
 /* ---------- email (SES raw send; MIME built by nodemailer's MailComposer) ---------- */
 async function buildMime(m: Mail): Promise<Buffer> {
   // MailComposer handles headers, encoding, and attachments; SES just carries the bytes.
   const MailComposer = (await import('nodemailer/lib/mail-composer/index.js') as any).default;
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     // Replies follow the person: human-triggered sends carry the sender's email; system mail
     // goes to the general inbox (SES_REPLY_TO — set it in Admin → Integrations once the
     // shared mailbox exists; Donny's inbox is the fallback until then).
-    new MailComposer({ from: secret('SES_FROM'), replyTo: m.replyTo || secret('SES_REPLY_TO') || 'donny@trilogyconnections.com', to: m.to, subject: m.subject, text: m.text, html: m.html, attachments: m.attachments })
+    new MailComposer({ from: await secret('SES_FROM'), replyTo: m.replyTo || await secret('SES_REPLY_TO') || 'donny@trilogyconnections.com', to: m.to, subject: m.subject, text: m.text, html: m.html, attachments: m.attachments })
       .compile().build((err: any, msg: Buffer) => (err ? reject(err) : resolve(msg)));
   });
 }
 async function sesSendRaw(mime: Buffer) {
   const { SESClient, SendRawEmailCommand } = await import('@aws-sdk/client-ses');
   const ses = new SESClient({
-    region: secret('AWS_REGION') || 'us-west-2',
-    credentials: { accessKeyId: secret('AWS_ACCESS_KEY_ID'), secretAccessKey: secret('AWS_SECRET_ACCESS_KEY') },
+    region: await secret('AWS_REGION') || 'us-west-2',
+    credentials: { accessKeyId: await secret('AWS_ACCESS_KEY_ID'), secretAccessKey: await secret('AWS_SECRET_ACCESS_KEY') },
   });
   await ses.send(new SendRawEmailCommand({ RawMessage: { Data: mime } }));
 }
@@ -120,18 +122,18 @@ export interface Mail {
 
 /** Queue-always, send-when-live. Returns { sent } so callers can adapt copy. */
 export async function sendMail(m: Mail): Promise<{ sent: boolean; outboxId: number }> {
-  const info = db.prepare(`INSERT INTO outbox(kind,toAddr,subject,body,patientId,meta,status,createdAt)
-    VALUES('email',?,?,?,?,?,'queued',?)`)
-    .run(m.to, m.subject, m.text || m.html || '', m.patientId || null, JSON.stringify(m.meta || {}), nowMST());
+  const info = await q.run(`INSERT INTO outbox(kind,toAddr,subject,body,patientId,meta,status,createdAt)
+    VALUES('email',?,?,?,?,?,'queued',?)`,
+    m.to, m.subject, m.text || m.html || '', m.patientId || null, JSON.stringify(m.meta || {}), nowMST());
   const id = Number(info.lastInsertRowid);
-  if (!emailReady() || !m.to) return { sent: false, outboxId: id };
+  if (!await emailReady() || !m.to) return { sent: false, outboxId: id };
   try {
     await sesSendRaw(await buildMime(m));
-    db.prepare("UPDATE outbox SET status='sent', sentAt=? WHERE id=?").run(nowMST(), id);
+    await q.run("UPDATE outbox SET status='sent', sentAt=? WHERE id=?", nowMST(), id);
     return { sent: true, outboxId: id };
   } catch (err: any) {
-    db.prepare("UPDATE outbox SET status='failed', detail=? WHERE id=?").run(String(err?.message || err).slice(0, 300), id);
-    audit(null, 'email.sendFailed', 'outbox', String(id), String(err?.message || err).slice(0, 120));
+    await q.run("UPDATE outbox SET status='failed', detail=? WHERE id=?", String(err?.message || err).slice(0, 300), id);
+    await audit(null, 'email.sendFailed', 'outbox', String(id), String(err?.message || err).slice(0, 120));
     return { sent: false, outboxId: id };
   }
 }
@@ -144,15 +146,15 @@ export async function sendMail(m: Mail): Promise<{ sent: boolean; outboxId: numb
 async function sesv2Client() {
   const { SESv2Client } = await import('@aws-sdk/client-sesv2');
   return new SESv2Client({
-    region: secret('AWS_REGION') || 'us-west-2',
-    credentials: { accessKeyId: secret('AWS_ACCESS_KEY_ID'), secretAccessKey: secret('AWS_SECRET_ACCESS_KEY') },
+    region: await secret('AWS_REGION') || 'us-west-2',
+    credentials: { accessKeyId: await secret('AWS_ACCESS_KEY_ID'), secretAccessKey: await secret('AWS_SECRET_ACCESS_KEY') },
   });
 }
-export const sesDomain = () => (secret('SES_FROM').split('@')[1] || 'trilogyconnections.com').toLowerCase();
+export const sesDomain = async () => ((await secret('SES_FROM')).split('@')[1] || 'trilogyconnections.com').toLowerCase();
 
 /** Create (or fetch) the domain identity and return the DNS records to add at the registrar. */
 export async function sesSetupDomain() {
-  const domain = sesDomain();
+  const domain = await sesDomain();
   const c = await sesv2Client();
   const { CreateEmailIdentityCommand, GetEmailIdentityCommand } = await import('@aws-sdk/client-sesv2');
   let tokens: string[] = [];
@@ -177,7 +179,7 @@ export async function sesSetupDomain() {
 
 /** Verification + sandbox status for the panel. */
 export async function sesStatus() {
-  const domain = sesDomain();
+  const domain = await sesDomain();
   const c = await sesv2Client();
   const { GetEmailIdentityCommand, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
   let identity: any = null;
@@ -204,25 +206,25 @@ export async function sesVerifyAddress(email: string) {
 
 /* ---------- SMS (Twilio REST — no SDK needed) ---------- */
 export async function sendSms(to: string, body: string, patientId?: string | null): Promise<{ sent: boolean }> {
-  const info = db.prepare(`INSERT INTO outbox(kind,toAddr,subject,body,patientId,status,createdAt)
-    VALUES('sms',?,?,?,?,'queued',?)`).run(to, null, body, patientId || null, nowMST());
+  const info = await q.run(`INSERT INTO outbox(kind,toAddr,subject,body,patientId,status,createdAt)
+    VALUES('sms',?,?,?,?,'queued',?)`, to, null, body, patientId || null, nowMST());
   const id = Number(info.lastInsertRowid);
-  if (!smsReady()) return { sent: false };
+  if (!await smsReady()) return { sent: false };
   try {
-    const sid = secret('TWILIO_ACCOUNT_SID');
+    const sid = await secret('TWILIO_ACCOUNT_SID');
     const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
       method: 'POST',
       headers: {
-        Authorization: 'Basic ' + Buffer.from(sid + ':' + secret('TWILIO_AUTH_TOKEN')).toString('base64'),
+        Authorization: 'Basic ' + Buffer.from(sid + ':' + await secret('TWILIO_AUTH_TOKEN')).toString('base64'),
         'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: new URLSearchParams({ To: to, From: secret('TWILIO_FROM'), Body: body }).toString(),
+      body: new URLSearchParams({ To: to, From: await secret('TWILIO_FROM'), Body: body }).toString(),
     });
     if (!res.ok) throw new Error(`Twilio ${res.status}`);
-    db.prepare("UPDATE outbox SET status='sent', sentAt=? WHERE id=?").run(nowMST(), id);
+    await q.run("UPDATE outbox SET status='sent', sentAt=? WHERE id=?", nowMST(), id);
     return { sent: true };
   } catch (err: any) {
-    db.prepare("UPDATE outbox SET status='failed', detail=? WHERE id=?").run(String(err?.message || err).slice(0, 300), id);
+    await q.run("UPDATE outbox SET status='failed', detail=? WHERE id=?", String(err?.message || err).slice(0, 300), id);
     return { sent: false };
   }
 }
@@ -273,8 +275,8 @@ async function toTextractBytes(bytes: Buffer, mime?: string): Promise<Buffer> {
 async function txClient() {
   const { TextractClient } = await import('@aws-sdk/client-textract');
   return new TextractClient({
-    region: secret('AWS_REGION') || 'us-west-2',
-    credentials: { accessKeyId: secret('AWS_ACCESS_KEY_ID'), secretAccessKey: secret('AWS_SECRET_ACCESS_KEY') },
+    region: await secret('AWS_REGION') || 'us-west-2',
+    credentials: { accessKeyId: await secret('AWS_ACCESS_KEY_ID'), secretAccessKey: await secret('AWS_SECRET_ACCESS_KEY') },
   });
 }
 
@@ -339,7 +341,7 @@ async function parseClaimFormTables(tx: any, bytes: Buffer): Promise<{ lines: Pa
 }
 
 export async function parseBillFile(rawBytes: Buffer, mime?: string): Promise<ParsedBill | null> {
-  if (!ocrReady()) return null;
+  if (!await ocrReady()) return null;
   const bytes = await toTextractBytes(rawBytes, mime);
   const tx = await txClient();
   const { AnalyzeExpenseCommand } = await import('@aws-sdk/client-textract');
@@ -395,7 +397,7 @@ export async function parseBillFile(rawBytes: Buffer, mime?: string): Promise<Pa
 }
 
 /* ---------- prospecting search (Google Places API New) ---------- */
-export const placesReady = () => !!secret('GOOGLE_MAPS_API_KEY');
+export const placesReady = async () => !!await secret('GOOGLE_MAPS_API_KEY');
 
 export interface PlaceHit {
   name: string; address: string | null; phone: string | null; website: string | null;
@@ -403,7 +405,7 @@ export interface PlaceHit {
 }
 /** Text search, paged up to ~60 results. Throws on API errors (caller maps to a friendly message). */
 export async function searchPlaces(query: string, maxPages = 3): Promise<PlaceHit[]> {
-  const key = secret('GOOGLE_MAPS_API_KEY');
+  const key = await secret('GOOGLE_MAPS_API_KEY');
   const out: PlaceHit[] = [];
   let pageToken: string | undefined;
   for (let page = 0; page < maxPages; page++) {
@@ -440,7 +442,7 @@ export async function searchPlaces(query: string, maxPages = 3): Promise<PlaceHi
 let sentry: any = null;
 let sentryDsn = '';
 async function getSentry() {
-  const dsn = secret('SENTRY_DSN');
+  const dsn = await secret('SENTRY_DSN');
   if (!dsn) return null;
   if (sentry && sentryDsn === dsn) return sentry;
   const S = await import('@sentry/node');
@@ -465,13 +467,13 @@ export function installProcessErrorReporting() {
 }
 
 /* ---------- inbound fax (Faxage) — polls when credentials exist, lands in Requests ---------- */
-export const faxReady = () => !!(secret('FAXAGE_USERNAME') && secret('FAXAGE_PASSWORD'));
-const faxCreds = () => new URLSearchParams({
-  username: secret('FAXAGE_USERNAME'), company: secret('FAXAGE_COMPANY'), password: secret('FAXAGE_PASSWORD'),
+export const faxReady = async () => !!(await secret('FAXAGE_USERNAME') && await secret('FAXAGE_PASSWORD'));
+const faxCreds = async () => new URLSearchParams({
+  username: await secret('FAXAGE_USERNAME'), company: await secret('FAXAGE_COMPANY'), password: await secret('FAXAGE_PASSWORD'),
 });
 
 async function faxage(params: Record<string, string>): Promise<Response> {
-  const body = faxCreds();
+  const body = await faxCreds();
   for (const [k, v] of Object.entries(params)) body.set(k, v);
   const r = await fetch('https://api.faxage.com/httpsfax.php', {
     method: 'POST',
@@ -484,33 +486,33 @@ async function faxage(params: Record<string, string>): Promise<Response> {
 
 /** Pull any new received faxes into the Requests (intake) queue. Never throws. */
 export async function pollInboundFaxes(): Promise<{ imported: number } | null> {
-  if (!faxReady()) return null;
+  if (!await faxReady()) return null;
   try {
     const list = await (await faxage({ operation: 'listfax' })).text();
-    if (/^ERR/m.test(list)) { audit(null, 'fax.pollError', undefined, undefined, list.slice(0, 120)); return null; }
+    if (/^ERR/m.test(list)) { await audit(null, 'fax.pollError', undefined, undefined, list.slice(0, 120)); return null; }
     let imported = 0;
     for (const line of list.split('\n').map(l => l.trim()).filter(Boolean)) {
       const f = line.split('\t');                    // recvid, recvdate, [starttime,] CID, DNIS, ...
       const recvid = f[0];
-      if (!/^\d+$/.test(recvid) || db.prepare('SELECT 1 FROM fax_seen WHERE recvid=?').get(recvid)) continue;
+      if (!/^\d+$/.test(recvid) || await q.get('SELECT 1 FROM fax_seen WHERE recvid=?', recvid)) continue;
       const from = f.length >= 4 ? f[f.length >= 5 ? 3 : 2] : 'unknown';
       const bytes = Buffer.from(await (await faxage({ operation: 'getfax', faxid: recvid })).arrayBuffer());
       if (!bytes.length || /^ERR/.test(bytes.subarray(0, 8).toString())) continue;
       const fid = crypto.randomUUID();
       const name = `fax-${recvid}.pdf`;
       await putFile(fid, bytes);
-      db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
-        .run(fid, name, 'application/pdf', bytes.length, 'inbound-fax', nowMST());
-      db.prepare(`INSERT INTO intake_items(channel,kind,status,fileId,fileName,fromInfo,note,receivedAt)
-        VALUES('fax','bill','triage',?,?,?,?,?)`)
-        .run(fid, name, `Fax from ${from}`, `Received ${f[1] || ''}`.trim(), nowMST());
-      db.prepare('INSERT INTO fax_seen(recvid,at) VALUES(?,?)').run(recvid, nowMST());
-      audit(null, 'inbound.fax', undefined, undefined, `${name} from ${from}`);
+      await q.run('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)',
+        fid, name, 'application/pdf', bytes.length, 'inbound-fax', nowMST());
+      await q.run(`INSERT INTO intake_items(channel,kind,status,fileId,fileName,fromInfo,note,receivedAt)
+        VALUES('fax','bill','triage',?,?,?,?,?)`,
+        fid, name, `Fax from ${from}`, `Received ${f[1] || ''}`.trim(), nowMST());
+      await q.run('INSERT INTO fax_seen(recvid,at) VALUES(?,?)', recvid, nowMST());
+      await audit(null, 'inbound.fax', undefined, undefined, `${name} from ${from}`);
       imported++;
     }
     return { imported };
   } catch (err: any) {
-    audit(null, 'fax.pollError', undefined, undefined, String(err?.message || err).slice(0, 120));
+    await audit(null, 'fax.pollError', undefined, undefined, String(err?.message || err).slice(0, 120));
     return null;
   }
 }
@@ -521,13 +523,13 @@ export function scheduleFaxPolling() {
 }
 
 /* ---------- post-appointment SMS check-ins (runs dark until Twilio is live) ---------- */
-export function queueAppointmentCheckins() {
+export async function queueAppointmentCheckins() {
   const yday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  const rows = db.prepare(`SELECT a.id aid, a.patientId, p.name, p.phone FROM appointments a
+  const rows = await q.all(`SELECT a.id aid, a.patientId, p.name, p.phone FROM appointments a
     JOIN patients p ON p.id=a.patientId
-    WHERE substr(a.whenAt,1,10)=? AND p.phone IS NOT NULL AND p.stage<4`).all(yday) as any[];
+    WHERE substr(a.whenAt,1,10)=? AND p.phone IS NOT NULL AND p.stage<4`, yday) as any[];
   for (const r of rows) {
-    const already = db.prepare("SELECT 1 FROM outbox WHERE kind='sms' AND patientId=? AND body LIKE '%checking in%' AND substr(createdAt,1,10)=substr(?,1,10)").get(r.patientId, nowMST());
+    const already = await q.get("SELECT 1 FROM outbox WHERE kind='sms' AND patientId=? AND body LIKE '%checking in%' AND substr(createdAt,1,10)=substr(?,1,10)", r.patientId, nowMST());
     if (already) continue;
     // No PHI in the message body — a courtesy check-in only.
     const first = String(r.name).split(' ')[0];
