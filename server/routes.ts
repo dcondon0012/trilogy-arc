@@ -19,6 +19,7 @@ import {
   sesSetupDomain, sesStatus, sesVerifyAddress, pollInboundFaxes,
 } from './integrations.js';
 import { geocode, geoBatch, route } from './geo.js';
+import { persistUploads, openStored } from './storage.js';
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -72,7 +73,7 @@ api.get('/intake', (_req, res) => {
   res.json({ items, counts });
 });
 
-api.post('/intake/simulate-inbound', requireAdmin, upload.single('file'), (req, res) => {
+api.post('/intake/simulate-inbound', requireAdmin, upload.single('file'), persistUploads, (req, res) => {
   // Testing stand-in for the SES (email) and Faxage (fax) webhooks below.
   if (!req.file) return res.status(400).json({ error: 'Attach a file' });
   const fid = req.file.filename;
@@ -1450,7 +1451,7 @@ api.post('/receipts/:rid/link', (req, res) => {
   sendPatient(req, res, r.patientId);
 });
 
-api.post('/bills/:bid/attach/:field', upload.single('file'), (req, res) => {
+api.post('/bills/:bid/attach/:field', upload.single('file'), persistUploads, (req, res) => {
   const b = db.prepare('SELECT * FROM bills WHERE id=?').get(req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   if (b.voided) return res.status(400).json({ error: 'Bill is voided' });
@@ -1470,15 +1471,15 @@ api.post('/bills/:bid/attach/:field', upload.single('file'), (req, res) => {
 /* Uploaded files render inline only for types that can't carry scripts —
    anything else (HTML, SVG, unknown) downloads instead of executing on our origin. */
 export const SAFE_INLINE_MIME = /^(application\/pdf|image\/(png|jpe?g|gif|webp)|text\/plain)$/i;
-api.get('/files/:fid', (req, res) => {
+api.get('/files/:fid', async (req, res) => {
   const f = db.prepare('SELECT * FROM files WHERE id=?').get(req.params.fid) as any;
   if (!f) return res.status(404).json({ error: 'Not found' });
-  const p = path.join(UPLOAD_DIR, f.id);
-  if (!fs.existsSync(p)) return res.status(404).json({ error: 'File missing on disk' });
+  const stream = await openStored(f.id);
+  if (!stream) return res.status(404).json({ error: 'File missing from storage' });
   res.setHeader('Content-Type', f.mime || 'application/octet-stream');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Disposition', `${SAFE_INLINE_MIME.test(f.mime || '') ? 'inline' : 'attachment'}; filename="${encodeURIComponent(f.name)}"`);
-  fs.createReadStream(p).pipe(res);
+  stream.pipe(res);
 });
 
 api.post('/bills/:bid/pay', (req, res) => {
@@ -1555,7 +1556,7 @@ api.post('/sentdocs/:sid/advance', (req, res) => {
   sendPatient(req, res, d.patientId);
 });
 
-api.post('/patients/:id/documents', upload.single('file'), (req, res) => {
+api.post('/patients/:id/documents', upload.single('file'), persistUploads, (req, res) => {
   const name = req.file?.originalname || String(req.body?.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Name or file required' });
   let fid: string | null = null;
@@ -1843,7 +1844,7 @@ api.post('/admin/users/:uid/reset-mfa', requireAdmin, (req, res) => {
 });
 
 /* ================= bill entry v2 — files inline, payout always auto ================= */
-api.post('/patients/:id/bills2', upload.fields([{ name: 'bill', maxCount: 1 }, { name: 'note', maxCount: 1 }]), (req, res) => {
+api.post('/patients/:id/bills2', upload.fields([{ name: 'bill', maxCount: 1 }, { name: 'note', maxCount: 1 }]), persistUploads, (req, res) => {
   const v = req.body || {};
   const files = req.files as Record<string, Express.Multer.File[]> | undefined;
   const billFile = files?.bill?.[0]; const noteFile = files?.note?.[0];
@@ -1971,7 +1972,7 @@ api.get('/geo/route', async (req, res) => {
 });
 
 /* ================= provider contracts: BAA + rate agreement gate ================= */
-api.post('/providers/:id/contract/:kind(baa|rate)', upload.single('file'), (req, res) => {
+api.post('/providers/:id/contract/:kind(baa|rate)', upload.single('file'), persistUploads, (req, res) => {
   const pr = db.prepare('SELECT * FROM providers WHERE id=?').get(req.params.id) as any;
   if (!pr) return res.status(404).json({ error: 'Not found' });
   const kind = req.params.kind;

@@ -8,6 +8,7 @@ import { db, DATA_DIR } from './db.js';
 import { seedIfEmpty, ensureCoreUsers, flagSeedPasswords } from './seed.js';
 import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal, forgotPassword, resetPassword } from './auth.js';
 import { scheduleCheckins, scheduleFaxPolling, reportError, installProcessErrorReporting } from './integrations.js';
+import { putFile } from './storage.js';
 import { api } from './routes.js';
 import { portal } from './portal.js';
 import { fees, seedFeeCodes, scheduleFeeRefresh } from './fees.js';
@@ -97,13 +98,13 @@ app.post('/api/auth/register-portal', registerPortal);
 
 /* Inbound webhooks — SES (email) and Faxage (fax) POST here at deployment.
    Secured by a shared secret; both create triage intake items exactly like the in-app simulator. */
-app.post('/api/hooks/:channel(email|fax)', express.json({ limit: '45mb' }), (req, res) => {
+app.post('/api/hooks/:channel(email|fax)', express.json({ limit: '45mb' }), async (req, res) => {
   if (!process.env.INBOUND_WEBHOOK_SECRET || req.headers['x-trilogy-secret'] !== process.env.INBOUND_WEBHOOK_SECRET)
     return res.status(401).json({ error: 'Bad webhook secret' });
   const { fileName, fileB64, mime, fromInfo, note } = req.body || {};
   if (!fileB64 || !fileName) return res.status(400).json({ error: 'fileB64 and fileName required' });
   const fid = crypto.randomUUID();
-  fs.writeFileSync(path.join(DATA_DIR, 'uploads', fid), Buffer.from(fileB64, 'base64'));
+  await putFile(fid, Buffer.from(fileB64, 'base64'));
   db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
     .run(fid, fileName, mime || 'application/pdf', Buffer.byteLength(fileB64, 'base64'), 'inbound-' + req.params.channel, nowMST());
   db.prepare(`INSERT INTO intake_items(channel,kind,status,fileId,fileName,fromInfo,note,receivedAt)

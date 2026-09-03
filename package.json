@@ -16,6 +16,7 @@
     "postinstall": "npm --prefix client install"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1125.0",
     "@aws-sdk/client-ses": "^3.1124.0",
     "@aws-sdk/client-sesv2": "^3.1124.0",
     "@aws-sdk/client-textract": "^3.1124.0",

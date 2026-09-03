@@ -983,6 +983,21 @@ async function main() {
   r = await call('POST', '/api/crm/prospects/search', { market: '', specialty: '' });
   assert(r.status === 400, 'prospect auto-search requires market + specialty');
 
+  /* ---- storage layer: upload → download round trip (local mode) ---- */
+  {
+    const fd = new FormData();
+    fd.append('file', new Blob([Buffer.from('storage round trip ok')], { type: 'text/plain' }), 'roundtrip.txt');
+    fd.append('name', 'Storage round trip');
+    fd.append('cat', 'Other');
+    r = await call('POST', '/api/patients/PT-10042/documents', undefined, fd);
+    assert(r.status === 200, 'document upload accepted');
+    const doc = (r.data.documents || []).find((d: any) => d.name === 'roundtrip.txt');
+    assert(!!doc?.fileId, 'uploaded document has a stored file');
+    const res2 = await fetch(BASE + '/api/files/' + doc.fileId, { headers: { Cookie: cookies.join('; ') } });
+    const body = await res2.text();
+    assert(res2.status === 200 && body === 'storage round trip ok', 'stored file streams back byte-identical');
+  }
+
   // put nicole back to coord123 through the same flow (keeps reruns clean)
   cookies = [];
   await call('POST', '/api/auth/forgot-password', { email: 'nicole@trilogymed.com' });

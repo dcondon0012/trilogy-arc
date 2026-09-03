@@ -4,6 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { db, nowMST, addNote, audit, UPLOAD_DIR, fullInsurer } from './db.js';
+import { persistUploads, openStored } from './storage.js';
 import { requireAuth } from './auth.js';
 import { envelope } from './engines.js';
 
@@ -61,17 +62,17 @@ portal.use((req, res, next) => {
 });
 
 /* ================= shared: files & messages ================= */
-portal.get('/files/:fid', (req, res) => {
+portal.get('/files/:fid', async (req, res) => {
   if (!canSeeFile(req.user, req.params.fid)) return res.status(403).json({ error: 'Not available' });
   const f = db.prepare('SELECT * FROM files WHERE id=?').get(req.params.fid) as any;
   if (!f) return res.status(404).json({ error: 'Not found' });
-  const p = path.join(UPLOAD_DIR, f.id);
-  if (!fs.existsSync(p)) return res.status(404).json({ error: 'File missing' });
+  const stream = await openStored(f.id);
+  if (!stream) return res.status(404).json({ error: 'File missing' });
   const safeInline = /^(application\/pdf|image\/(png|jpe?g|gif|webp)|text\/plain)$/i.test(f.mime || '');
   res.setHeader('Content-Type', f.mime || 'application/octet-stream');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Disposition', `${safeInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(f.name)}"`);
-  fs.createReadStream(p).pipe(res);
+  stream.pipe(res);
 });
 
 function accessiblePatient(user: any, pid: string): boolean {

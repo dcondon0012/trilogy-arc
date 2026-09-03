@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { db, nowMST, audit, DATA_DIR } from './db.js';
+import { putFile } from './storage.js';
 
 /* ---------- secrets: env wins, then the admin-entered table ---------- */
 export function secret(k: string): string {
@@ -497,7 +498,7 @@ export async function pollInboundFaxes(): Promise<{ imported: number } | null> {
       if (!bytes.length || /^ERR/.test(bytes.subarray(0, 8).toString())) continue;
       const fid = crypto.randomUUID();
       const name = `fax-${recvid}.pdf`;
-      fs.writeFileSync(path.join(DATA_DIR, 'uploads', fid), bytes);
+      await putFile(fid, bytes);
       db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
         .run(fid, name, 'application/pdf', bytes.length, 'inbound-fax', nowMST());
       db.prepare(`INSERT INTO intake_items(channel,kind,status,fileId,fileName,fromInfo,note,receivedAt)
