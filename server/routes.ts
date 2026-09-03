@@ -4,7 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import {
-  db, nowMST, nextId, addNote, audit,
+  q, tx, nowMST, nextId, addNote, audit,
   fullPatient, fullProvider, fullInsurer, patientSummaries,
   insAutoStats, branchStats, UPLOAD_DIR, recordStage, computeBillEconomics,
 } from './db.js';
@@ -45,63 +45,60 @@ function stripPayout(p: any, role: string) {
   return p;
 }
 type Rq = { user?: { role: string } };
-const sendPatient = (req: any, res: any, pid: string, extra?: Record<string, any>) =>
-  res.json({ ...stripPayout(fullPatient(pid), req.user!.role), ...(extra || {}) });
+const sendPatient = async (req: any, res: any, pid: string, extra?: Record<string, any>) =>
+  res.json({ ...stripPayout(await fullPatient(pid), req.user!.role), ...(extra || {}) });
 
 export const api = Router();
 api.use(requireAuth);
 api.use(requireStaff); // portal users (provider/carrier) use /api/portal — never this router
 
 /* ================= bootstrap & search ================= */
-api.get('/bootstrap', (req, res) => {
+api.get('/bootstrap', async (req, res) => {
   res.json({
     user: req.user,
-    users: db.prepare('SELECT id,name,email,role FROM users').all(),
-    patients: patientSummaries(),
-    providers: (db.prepare('SELECT id FROM providers').all() as any[]).map(r => fullProvider(r.id)),
-    insurers: (db.prepare('SELECT id FROM insurers').all() as any[]).map(r => fullInsurer(r.id)),
-    prefs: db.prepare('SELECT key,color,size FROM widget_prefs WHERE userId=?').all(req.user!.id),
+    users: await q.all('SELECT id,name,email,role FROM users'),
+    patients: await patientSummaries(),
+    providers: await Promise.all((await q.all('SELECT id FROM providers') as any[]).map(async r => await fullProvider(r.id))),
+    insurers: await Promise.all((await q.all('SELECT id FROM insurers') as any[]).map(async r => await fullInsurer(r.id))),
+    prefs: await q.all('SELECT key,color,size FROM widget_prefs WHERE userId=?', req.user!.id),
   });
 });
 
 /* ================= intake queue (the communication hub) ================= */
-api.get('/intake', (_req, res) => {
-  const items = db.prepare(`SELECT i.*, p.name AS patientName, pr.name AS providerName
+api.get('/intake', async (_req, res) => {
+  const items = await q.all(`SELECT i.*, p.name AS patientName, pr.name AS providerName
     FROM intake_items i LEFT JOIN patients p ON p.id=i.patientId LEFT JOIN providers pr ON pr.id=i.providerId
-    ORDER BY CASE i.status WHEN 'triage' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, i.id DESC LIMIT 300`).all();
-  const counts = db.prepare(`SELECT status, COUNT(*) c FROM intake_items GROUP BY status`).all();
+    ORDER BY CASE i.status WHEN 'triage' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, i.id DESC LIMIT 300`);
+  const counts = await q.all(`SELECT status, COUNT(*) c FROM intake_items GROUP BY status`, );
   res.json({ items, counts });
 });
 
-api.post('/intake/simulate-inbound', requireAdmin, upload.single('file'), persistUploads, (req, res) => {
+api.post('/intake/simulate-inbound', requireAdmin, upload.single('file'), persistUploads, async (req, res) => {
   // Testing stand-in for the SES (email) and Faxage (fax) webhooks below.
   if (!req.file) return res.status(400).json({ error: 'Attach a file' });
   const fid = req.file.filename;
-  db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
-    .run(fid, req.file.originalname, req.file.mimetype, req.file.size, 'inbound', nowMST());
-  db.prepare(`INSERT INTO intake_items(channel,kind,status,fileId,fileName,fromInfo,note,receivedAt)
-    VALUES(?,?,'triage',?,?,?,?,?)`)
-    .run(req.body?.channel === 'fax' ? 'fax' : 'email', 'bill', fid, req.file.originalname,
+  await q.run('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)', fid, req.file.originalname, req.file.mimetype, req.file.size, 'inbound', nowMST());
+  await q.run(`INSERT INTO intake_items(channel,kind,status,fileId,fileName,fromInfo,note,receivedAt)
+    VALUES(?,?,'triage',?,?,?,?,?)`, req.body?.channel === 'fax' ? 'fax' : 'email', 'bill', fid, req.file.originalname,
       req.body?.fromInfo || 'simulated@example.com', req.body?.note || '(simulated inbound)', nowMST());
-  audit(req.user!, 'intake.simulate', undefined, undefined, req.file.originalname);
+  await audit(req.user!, 'intake.simulate', undefined, undefined, req.file.originalname);
   res.json({ ok: true });
 });
 
-api.post('/intake/:iid/assign', (req, res) => {
-  const it = db.prepare('SELECT * FROM intake_items WHERE id=?').get(req.params.iid) as any;
+api.post('/intake/:iid/assign', async (req, res) => {
+  const it = await q.get('SELECT * FROM intake_items WHERE id=?', req.params.iid) as any;
   if (!it) return res.status(404).json({ error: 'Not found' });
   const { patientId, providerId } = req.body || {};
-  if (patientId && !db.prepare('SELECT 1 FROM patients WHERE id=?').get(patientId)) return res.status(400).json({ error: 'Unknown patient' });
-  if (providerId && !db.prepare('SELECT 1 FROM providers WHERE id=?').get(providerId)) return res.status(400).json({ error: 'Unknown provider' });
-  db.prepare("UPDATE intake_items SET patientId=?, providerId=?, status='queued' WHERE id=?")
-    .run(patientId || it.patientId, providerId || it.providerId, it.id);
-  if (patientId) addNote(patientId, `Inbound ${it.channel} document assigned to this case: "${it.fileName}"`, req.user!.name);
-  audit(req.user!, 'intake.assign', 'intake', String(it.id));
+  if (patientId && !await q.get('SELECT 1 FROM patients WHERE id=?', patientId)) return res.status(400).json({ error: 'Unknown patient' });
+  if (providerId && !await q.get('SELECT 1 FROM providers WHERE id=?', providerId)) return res.status(400).json({ error: 'Unknown provider' });
+  await q.run("UPDATE intake_items SET patientId=?, providerId=?, status='queued' WHERE id=?", patientId || it.patientId, providerId || it.providerId, it.id);
+  if (patientId) await addNote(patientId, `Inbound ${it.channel} document assigned to this case: "${it.fileName}"`, req.user!.name);
+  await audit(req.user!, 'intake.assign', 'intake', String(it.id));
   res.json({ ok: true });
 });
 
-api.post('/intake/:iid/parse', (req, res) => {
-  const it = db.prepare('SELECT * FROM intake_items WHERE id=?').get(req.params.iid) as any;
+api.post('/intake/:iid/parse', async (req, res) => {
+  const it = await q.get('SELECT * FROM intake_items WHERE id=?', req.params.iid) as any;
   if (!it) return res.status(404).json({ error: 'Not found' });
   // v1 STUB — at deployment this calls Textract + Bedrock (Claude) on the PDF in S3.
   // Returns a skeleton the coordinator corrects in the review UI; structure matches the real parser's output.
@@ -112,102 +109,96 @@ api.post('/intake/:iid/parse', (req, res) => {
     lines: [{ cpt: '', icd: '', units: 1, charge: 0 }],
     notes: 'Stub parse — enter values from the PDF. The deployed parser pre-fills these fields.',
   };
-  db.prepare('UPDATE intake_items SET parsed=? WHERE id=?').run(JSON.stringify(parsed), it.id);
-  audit(req.user!, 'intake.parse', 'intake', String(it.id));
+  await q.run('UPDATE intake_items SET parsed=? WHERE id=?', JSON.stringify(parsed), it.id);
+  await audit(req.user!, 'intake.parse', 'intake', String(it.id));
   res.json(parsed);
 });
 
-api.post('/intake/:iid/process', (req, res) => {
-  const it = db.prepare('SELECT * FROM intake_items WHERE id=?').get(req.params.iid) as any;
+api.post('/intake/:iid/process', async (req, res) => {
+  const it = await q.get('SELECT * FROM intake_items WHERE id=?', req.params.iid) as any;
   if (!it) return res.status(404).json({ error: 'Not found' });
   if (it.status === 'processed') return res.status(400).json({ error: 'Already processed' });
   const v = req.body || {};
   const patientId = v.patientId || it.patientId;
   const providerId = v.providerId || it.providerId;
   if (it.kind === 'referral') {
-    db.prepare("UPDATE intake_items SET status='processed', processedBy=? WHERE id=?").run(req.user!.name, it.id);
-    if (it.patientId) addNote(it.patientId, 'Referral reviewed — intake accepted', req.user!.name);
-    audit(req.user!, 'intake.referralReviewed', 'patient', it.patientId || undefined);
+    await q.run("UPDATE intake_items SET status='processed', processedBy=? WHERE id=?", req.user!.name, it.id);
+    if (it.patientId) await addNote(it.patientId, 'Referral reviewed — intake accepted', req.user!.name);
+    await audit(req.user!, 'intake.referralReviewed', 'patient', it.patientId || undefined);
     return res.json({ ok: true });
   }
   if (it.kind === 'bill') {
     if (!patientId || !providerId) return res.status(400).json({ error: 'Assign patient and provider first' });
-    const link = db.prepare('SELECT * FROM prov_links WHERE patientId=? AND providerId=?').get(patientId, providerId) as any;
+    const link = await q.get('SELECT * FROM prov_links WHERE patientId=? AND providerId=?', patientId, providerId) as any;
     if (!link) return res.status(400).json({ error: 'Provider is not linked to this patient yet' });
     const items: any[] = Array.isArray(v.items) ? v.items.filter((x: any) => x.cpt || x.charge) : [];
     const billed = Number(v.billed) || items.reduce((s, x) => s + (Number(x.charge) || 0) * (Number(x.units) || 1), 0);
     if (!(billed > 0)) return res.status(400).json({ error: 'Billed amount (or line items) required' });
     let rate = Number(v.rate) || 0;
     if (!rate) {
-      const branch = db.prepare('SELECT * FROM branches WHERE providerId=? AND (name=? OR (SELECT COUNT(*) FROM branches WHERE providerId=?)=1)')
-        .get(providerId, link.branch || '', providerId) as any;
+      const branch = await q.get('SELECT * FROM branches WHERE providerId=? AND (name=? OR (SELECT COUNT(*) FROM branches WHERE providerId=?)=1)', providerId, link.branch || '', providerId) as any;
       if (branch?.ratePct) rate = Math.round(Math.min(billed * branch.ratePct / 100, branch.rateCap || Infinity) * 100) / 100;
     }
     const bid = 'b' + Date.now() + Math.floor(Math.random() * 1000);
-    db.prepare(`INSERT INTO bills(id,patientId,providerId,dos,billed,rate,hasBill,billFileId,billFileName)
-      VALUES(?,?,?,?,?,?,1,?,?)`).run(bid, patientId, providerId, v.dos || null, billed, rate, it.fileId, it.fileName);
+    await q.run(`INSERT INTO bills(id,patientId,providerId,dos,billed,rate,hasBill,billFileId,billFileName)
+      VALUES(?,?,?,?,?,?,1,?,?)`, bid, patientId, providerId, v.dos || null, billed, rate, it.fileId, it.fileName);
     for (const x of items)
-      db.prepare('INSERT INTO bill_items(billId,cpt,icd,units,charge,modifier) VALUES(?,?,?,?,?,?)')
-        .run(bid, x.cpt || null, x.icd || null, Number(x.units) || 1, Number(x.charge) || 0, x.modifier || null);
-    db.prepare('UPDATE prov_links SET billed=billed+? WHERE patientId=? AND providerId=?').run(billed, patientId, providerId);
+      await q.run('INSERT INTO bill_items(billId,cpt,icd,units,charge,modifier) VALUES(?,?,?,?,?,?)', bid, x.cpt || null, x.icd || null, Number(x.units) || 1, Number(x.charge) || 0, x.modifier || null);
+    await q.run('UPDATE prov_links SET billed=billed+? WHERE patientId=? AND providerId=?', billed, patientId, providerId);
     // Fee-schedule check
-    const state = (db.prepare('SELECT state FROM patients WHERE id=?').get(patientId) as any)?.state;
+    const state = (await q.get('SELECT state FROM patients WHERE id=?', patientId) as any)?.state;
     const flags: string[] = [];
     if (state) for (const x of items) {
-      const fs = db.prepare('SELECT allowed FROM fee_schedules WHERE state=? AND cpt=?').get(state, x.cpt) as any;
+      const fs = await q.get('SELECT allowed FROM fee_schedules WHERE state=? AND cpt=?', state, x.cpt) as any;
       if (fs && Number(x.charge) > fs.allowed) flags.push(`${x.cpt} billed ${fmt$(Number(x.charge))} vs ${state} allowed ${fmt$(fs.allowed)}`);
     }
-    db.prepare("UPDATE intake_items SET status='processed', patientId=?, providerId=?, processedBy=? WHERE id=?")
-      .run(patientId, providerId, req.user!.name, it.id);
-    addNote(patientId, `Bill processed from ${it.channel} intake: DOS ${fmtDate(v.dos)} · ${fmt$(billed)}${items.length ? ` · ${items.length} CPT line${items.length === 1 ? '' : 's'}` : ''}${flags.length ? ' fee schedule: ' + flags.join('; ') : ''}`, req.user!.name);
-    audit(req.user!, 'intake.process', 'bill', bid);
+    await q.run("UPDATE intake_items SET status='processed', patientId=?, providerId=?, processedBy=? WHERE id=?", patientId, providerId, req.user!.name, it.id);
+    await addNote(patientId, `Bill processed from ${it.channel} intake: DOS ${fmtDate(v.dos)} · ${fmt$(billed)}${items.length ? ` · ${items.length} CPT line${items.length === 1 ? '' : 's'}` : ''}${flags.length ? ' fee schedule: ' + flags.join('; ') : ''}`, req.user!.name);
+    await audit(req.user!, 'intake.process', 'bill', bid);
     return res.json({ ok: true, billId: bid, feeFlags: flags });
   }
   // records / other → attach as document
   if (!patientId) return res.status(400).json({ error: 'Assign a patient first' });
-  db.prepare('INSERT INTO documents(patientId,name,cat,meta,fileId) VALUES(?,?,?,?,?)')
-    .run(patientId, it.fileName, 'Medical', nowMST() + ' · via ' + it.channel, it.fileId);
-  db.prepare("UPDATE intake_items SET status='processed', patientId=?, processedBy=? WHERE id=?").run(patientId, req.user!.name, it.id);
-  addNote(patientId, `Document filed from ${it.channel} intake: "${it.fileName}"`, req.user!.name);
-  audit(req.user!, 'intake.process', 'document', String(it.id));
+  await q.run('INSERT INTO documents(patientId,name,cat,meta,fileId) VALUES(?,?,?,?,?)', patientId, it.fileName, 'Medical', nowMST() + ' · via ' + it.channel, it.fileId);
+  await q.run("UPDATE intake_items SET status='processed', patientId=?, processedBy=? WHERE id=?", patientId, req.user!.name, it.id);
+  await addNote(patientId, `Document filed from ${it.channel} intake: "${it.fileName}"`, req.user!.name);
+  await audit(req.user!, 'intake.process', 'document', String(it.id));
   res.json({ ok: true });
 });
 
-api.post('/intake/:iid/reject', (req, res) => {
-  const it = db.prepare('SELECT * FROM intake_items WHERE id=?').get(req.params.iid) as any;
+api.post('/intake/:iid/reject', async (req, res) => {
+  const it = await q.get('SELECT * FROM intake_items WHERE id=?', req.params.iid) as any;
   if (!it) return res.status(404).json({ error: 'Not found' });
   const reason = String(req.body?.reason || '').trim();
   if (!reason) return res.status(400).json({ error: 'Reason required' });
-  db.prepare("UPDATE intake_items SET status='rejected', note=COALESCE(note,'')||' · rejected: '||?, processedBy=? WHERE id=?")
-    .run(reason, req.user!.name, it.id);
-  audit(req.user!, 'intake.reject', 'intake', String(it.id), reason);
+  await q.run("UPDATE intake_items SET status='rejected', note=COALESCE(note,'')||' · rejected: '||?, processedBy=? WHERE id=?", reason, req.user!.name, it.id);
+  await audit(req.user!, 'intake.reject', 'intake', String(it.id), reason);
   res.json({ ok: true });
 });
 
 /* ---- bill denial / appeal tracking ---- */
-api.post('/bills/:bid/denial', (req, res) => {
-  const b = db.prepare('SELECT * FROM bills WHERE id=?').get(req.params.bid) as any;
+api.post('/bills/:bid/denial', async (req, res) => {
+  const b = await q.get('SELECT * FROM bills WHERE id=?', req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   const { denied, denialReason, appealStatus } = req.body || {};
   const okStatus = ['none', 'appealing', 'won', 'lost', 'written-off'];
   if (appealStatus && !okStatus.includes(appealStatus)) return res.status(400).json({ error: 'Bad appeal status' });
   if (denied && !String(denialReason || '').trim()) return res.status(400).json({ error: 'Denial reason required' });
-  db.prepare('UPDATE bills SET denied=?, denialReason=?, appealStatus=? WHERE id=?')
-    .run(denied ? 1 : 0, denialReason || null, appealStatus || (denied ? 'none' : 'none'), b.id);
-  addNote(b.patientId, denied
+  await q.run('UPDATE bills SET denied=?, denialReason=?, appealStatus=? WHERE id=?', denied ? 1 : 0, denialReason || null, appealStatus || (denied ? 'none' : 'none'), b.id);
+  await addNote(b.patientId, denied
     ? `Bill DENIED by carrier (DOS ${fmtDate(b.dos)}): ${denialReason}${appealStatus && appealStatus !== 'none' ? ' — appeal: ' + appealStatus : ''}`
     : `Denial cleared on DOS ${fmtDate(b.dos)} bill`, req.user!.name);
-  audit(req.user!, 'bill.denial', 'bill', b.id, denied ? denialReason : 'cleared');
-  sendPatient(req, res, b.patientId);
+  await audit(req.user!, 'bill.denial', 'bill', b.id, denied ? denialReason : 'cleared');
+  await sendPatient(req, res, b.patientId);
 });
 
 /* ---- contracted rates (carrier prices & provider payouts per CPT) ---- */
-api.get('/rates/:kind(carrier|provider)/:id', requireAdmin, (req, res) => {
+api.get('/rates/:kind(carrier|provider)/:id', requireAdmin, async (req, res) => {
   const t = req.params.kind === 'carrier' ? 'carrier_rates' : 'provider_rates';
   const col = req.params.kind === 'carrier' ? 'insurerId' : 'providerId';
-  res.json(db.prepare(`SELECT * FROM ${t} WHERE ${col}=? ORDER BY cpt`).all(req.params.id));
+  res.json(await q.all(`SELECT * FROM ${t} WHERE ${col}=? ORDER BY cpt`, req.params.id));
 });
-api.post('/rates/:kind(carrier|provider)/:id', requireAdmin, (req, res) => {
+api.post('/rates/:kind(carrier|provider)/:id', requireAdmin, async (req, res) => {
   // Bulk paste: rows of "CPT amount" (one per line) or array [{cpt, amount}]
   const kind = req.params.kind;
   let rows: Array<{ cpt: string; amount: number }> = [];
@@ -221,37 +212,35 @@ api.post('/rates/:kind(carrier|provider)/:id', requireAdmin, (req, res) => {
   const t = kind === 'carrier' ? 'carrier_rates' : 'provider_rates';
   const col = kind === 'carrier' ? 'insurerId' : 'providerId';
   const val = kind === 'carrier' ? 'price' : 'payout';
-  const tx = db.transaction(() => {
+  await tx(async () => {
     for (const r of rows) if (r.cpt && r.amount > 0)
-      db.prepare(`INSERT INTO ${t}(${col},cpt,${val}) VALUES(?,?,?) ON CONFLICT(${col},cpt) DO UPDATE SET ${val}=excluded.${val}`)
-        .run(req.params.id, String(r.cpt).trim(), r.amount);
+      await q.run(`INSERT INTO ${t}(${col},cpt,${val}) VALUES(?,?,?) ON CONFLICT(${col},cpt) DO UPDATE SET ${val}=excluded.${val}`, req.params.id, String(r.cpt).trim(), r.amount);
   });
-  tx();
-  audit(req.user!, `rates.${kind}.set`, kind, req.params.id, rows.length + ' rows');
-  res.json(db.prepare(`SELECT * FROM ${t} WHERE ${col}=? ORDER BY cpt`).all(req.params.id));
+  
+  await audit(req.user!, `rates.${kind}.set`, kind, req.params.id, rows.length + ' rows');
+  res.json(await q.all(`SELECT * FROM ${t} WHERE ${col}=? ORDER BY cpt`, req.params.id));
 });
 
 /* ---- state minimum coverage (intake auto-populate) ---- */
-api.get('/state-minimums', (_req, res) => res.json(db.prepare('SELECT * FROM state_minimums ORDER BY state').all()));
-api.post('/admin/state-minimums', requireAdmin, (req, res) => {
+api.get('/state-minimums', async (_req, res) => res.json(await q.all('SELECT * FROM state_minimums ORDER BY state')));
+api.post('/admin/state-minimums', requireAdmin, async (req, res) => {
   const { state, coverageType, amount, note } = req.body || {};
   if (!state || !coverageType || !(Number(amount) > 0)) return res.status(400).json({ error: 'State, type, amount required' });
-  db.prepare('INSERT INTO state_minimums(state,coverageType,amount,note) VALUES(?,?,?,?) ON CONFLICT(state,coverageType) DO UPDATE SET amount=excluded.amount, note=excluded.note')
-    .run(state, coverageType, Number(amount), note || null);
-  res.json(db.prepare('SELECT * FROM state_minimums ORDER BY state').all());
+  await q.run('INSERT INTO state_minimums(state,coverageType,amount,note) VALUES(?,?,?,?) ON CONFLICT(state,coverageType) DO UPDATE SET amount=excluded.amount, note=excluded.note', state, coverageType, Number(amount), note || null);
+  res.json(await q.all('SELECT * FROM state_minimums ORDER BY state'));
 });
 
 /* ---- batch bill packet (Oregon strategy: send all bills as one) ---- */
-api.get('/patients/:id/batch-packet', (req, res) => {
-  const p = fullPatient(req.params.id);
+api.get('/patients/:id/batch-packet', async (req, res) => {
+  const p = await fullPatient(req.params.id);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const bills = p.bills.filter((b: any) => !b.voided);
   const total = bills.reduce((s: number, b: any) => s + b.billed, 0);
-  const rows = bills.map((b: any) => {
-    const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(b.providerId) as any;
+  const rows = (await Promise.all(bills.map(async (b: any) => {
+    const pr = await q.get('SELECT name FROM providers WHERE id=?', b.providerId) as any;
     return `<tr><td>${pr?.name || ''}</td><td>${b.dos || ''}</td><td style="text-align:right">$${b.billed.toFixed(2)}</td><td>${b.hasNote ? 'attached' : 'MISSING'}</td></tr>`;
-  }).join('');
-  audit(req.user!, 'batchPacket.generate', 'patient', p.id);
+  }))).join('');
+  await audit(req.user!, 'batchPacket.generate', 'patient', p.id);
   res.setHeader('Content-Type', 'text/html');
   res.send(`<html><head><title>Trilogy Batch Bill Submission — ${p.name}</title>
 <style>body{font-family:-apple-system,sans-serif;max-width:700px;margin:40px auto;color:#1a2332}table{width:100%;border-collapse:collapse;margin:16px 0}td,th{border:1px solid #ccc;padding:8px;text-align:left;font-size:14px}h1{font-size:20px}@media print{button{display:none}}</style></head><body>
@@ -264,22 +253,20 @@ api.get('/patients/:id/batch-packet', (req, res) => {
 });
 
 /* ---- fee schedule admin ---- */
-api.get('/admin/fee-schedule', requireAdmin, (_req, res) =>
-  res.json(db.prepare('SELECT * FROM fee_schedules ORDER BY state, cpt').all()));
-api.post('/admin/fee-schedule', requireAdmin, (req, res) => {
+api.get('/admin/fee-schedule', requireAdmin, async (req, res) =>
+  res.json(await q.all('SELECT * FROM fee_schedules ORDER BY state, cpt')));
+api.post('/admin/fee-schedule', requireAdmin, async (req, res) => {
   const { state, cpt, allowed } = req.body || {};
   if (!state || !cpt || !(Number(allowed) > 0)) return res.status(400).json({ error: 'State, CPT, and allowed amount required' });
-  db.prepare('INSERT INTO fee_schedules(state,cpt,allowed) VALUES(?,?,?) ON CONFLICT(state,cpt) DO UPDATE SET allowed=excluded.allowed')
-    .run(String(state).trim(), String(cpt).trim(), Number(allowed));
-  audit(req.user!, 'feeSchedule.set', undefined, undefined, `${state} ${cpt} ${allowed}`);
-  res.json(db.prepare('SELECT * FROM fee_schedules ORDER BY state, cpt').all());
+  await q.run('INSERT INTO fee_schedules(state,cpt,allowed) VALUES(?,?,?) ON CONFLICT(state,cpt) DO UPDATE SET allowed=excluded.allowed', String(state).trim(), String(cpt).trim(), Number(allowed));
+  await audit(req.user!, 'feeSchedule.set', undefined, undefined, `${state} ${cpt} ${allowed}`);
+  res.json(await q.all('SELECT * FROM fee_schedules ORDER BY state, cpt'));
 });
 
 /* ================= the Decision Deck (Today) ================= */
-api.get('/deck', (req, res) => {
+api.get('/deck', async (req, res) => {
   const mine = req.user!.role === 'coordinator';
-  const myPts = (db.prepare('SELECT id,name,caseType,coordinator,insurerId,stage,uwLimit,carrierConfirmed,attorneyRetained FROM patients' + (mine ? ' WHERE coordinator=?' : ''))
-    .all(...(mine ? [req.user!.id] : [])) as any[]);
+  const myPts = (await q.all('SELECT id,name,caseType,coordinator,insurerId,stage,uwLimit,carrierConfirmed,attorneyRetained FROM patients' + (mine ? ' WHERE coordinator=?' : ''), ...(mine ? [req.user!.id] : [])) as any[]);
   const pidSet = new Set(myPts.map(p => p.id));
   const pName = (id: string) => myPts.find(p => p.id === id)?.name || id;
   const today = new Date().toISOString().slice(0, 10);
@@ -287,11 +274,11 @@ api.get('/deck', (req, res) => {
   const tile = (v: string, l: string) => ({ v, l });
 
   // 1 · Bills through the four-check → one-click release; failures → typed exception cards
-  const dupIds = duplicateBillIds();
-  for (const b of db.prepare(`SELECT b.*, pr.name AS prName FROM bills b JOIN providers pr ON pr.id=b.providerId
-    WHERE b.status='unpaid' AND b.voided=0 AND b.hasBill=1 AND b.hasNote=1 AND b.rate>0`).all() as any[]) {
+  const dupIds = await duplicateBillIds();
+  for (const b of await q.all(`SELECT b.*, pr.name AS prName FROM bills b JOIN providers pr ON pr.id=b.providerId
+    WHERE b.status='unpaid' AND b.voided=0 AND b.hasBill=1 AND b.hasNote=1 AND b.rate>0`) as any[]) {
     if (!pidSet.has(b.patientId) || dupIds.has(b.id)) continue;
-    const fc = billChecks(b);
+    const fc = await billChecks(b);
     const ckTiles = fc.checks.map(c => tile(c.status === 'pass' ? '✓' : c.status === 'warn' ? '~' : '✕', c.label.toLowerCase().replace('coverage ', '').replace(' vs contract', '≤contract').replace(' on file', '')));
     if (fc.verdict === 'green') {
       // Payout figures are admin-only; coordinators release at the contracted rate without seeing it.
@@ -332,8 +319,8 @@ api.get('/deck', (req, res) => {
   }
 
   // 1b · Duplicate bills (containment: never pay twice)
-  for (const b of db.prepare(`SELECT b.*, pr.name AS prName FROM bills b JOIN providers pr ON pr.id=b.providerId
-    WHERE b.status='unpaid' AND b.voided=0`).all() as any[]) {
+  for (const b of await q.all(`SELECT b.*, pr.name AS prName FROM bills b JOIN providers pr ON pr.id=b.providerId
+    WHERE b.status='unpaid' AND b.voided=0`) as any[]) {
     if (!pidSet.has(b.patientId) || !dupIds.has(b.id)) continue;
     cards.push({
       id: 'dup-' + b.id, type: '◉ Duplicate bill suspected', stripe: 'red', actor: 'sys',
@@ -351,8 +338,8 @@ api.get('/deck', (req, res) => {
   }
 
   // 2 · Bills blocked on records
-  for (const b of db.prepare(`SELECT b.*, pr.name AS prName FROM bills b JOIN providers pr ON pr.id=b.providerId
-    WHERE b.status='unpaid' AND b.voided=0 AND (b.hasBill=0 OR b.hasNote=0)`).all() as any[]) {
+  for (const b of await q.all(`SELECT b.*, pr.name AS prName FROM bills b JOIN providers pr ON pr.id=b.providerId
+    WHERE b.status='unpaid' AND b.voided=0 AND (b.hasBill=0 OR b.hasNote=0)`) as any[]) {
     if (!pidSet.has(b.patientId)) continue;
     const missing = b.hasBill ? 'visit note' : 'bill document';
     cards.push({
@@ -368,12 +355,12 @@ api.get('/deck', (req, res) => {
   }
 
   // 3 · Auth requests from providers (tasks created by portal)
-  for (const t of db.prepare(`SELECT * FROM tasks WHERE title LIKE 'Auth request from%'`).all() as any[]) {
+  for (const t of await q.all(`SELECT * FROM tasks WHERE title LIKE 'Auth request from%'`) as any[]) {
     if (!pidSet.has(t.patientId)) continue;
     const amtMatch = t.title.match(/\$([\d,]+(?:\.\d{2})?)/);
     const amt = amtMatch ? parseFloat(amtMatch[1].replace(/,/g, '')) : 0;
-    const link = db.prepare('SELECT l.*, pr.name AS prName FROM prov_links l JOIN providers pr ON pr.id=l.providerId WHERE l.patientId=? LIMIT 1').get(t.patientId) as any;
-    const env = envelope(t.patientId);
+    const link = await q.get('SELECT l.*, pr.name AS prName FROM prov_links l JOIN providers pr ON pr.id=l.providerId WHERE l.patientId=? LIMIT 1', t.patientId) as any;
+    const env = await envelope(t.patientId);
     const remaining = env.remaining, usage = env.usage;
     const basisWord = env.basis === 'auth' ? 'Carrier auth' : 'Coverage';
     const fits = amt > 0 && amt <= remaining;
@@ -385,10 +372,10 @@ api.get('/deck', (req, res) => {
       recommend: fits
         ? `Approve — fits the envelope with ${fmt$(remaining - amt)} to spare. Containment intact.`
         : `Review utilization first: request ${amt ? fmt$(amt) : '—'} vs ${fmt$(remaining)} remaining. Ask for the treatment plan before extending.`,
-      tiles: (() => {
-        const visits = link ? (db.prepare('SELECT COUNT(*) c FROM bills WHERE patientId=? AND providerId=? AND voided=0').get(t.patientId, link.providerId) as any).c : 0;
-        const prType = link ? (db.prepare('SELECT type FROM providers WHERE id=?').get(link.providerId) as any)?.type : null;
-        return [tile(fmt$(remaining), 'remaining'), tile(amt ? fmt$(amt) : '—', 'requested'), tile(`${visits}/${normFor(prType)}`, 'visits vs norm'), tile(fmt$(usage), 'used')];
+      tiles: await (async () => {
+        const visits = link ? (await q.get('SELECT COUNT(*) c FROM bills WHERE patientId=? AND providerId=? AND voided=0', t.patientId, link.providerId) as any).c : 0;
+        const prType = link ? (await q.get('SELECT type FROM providers WHERE id=?', link.providerId) as any)?.type : null;
+        return [tile(fmt$(remaining), 'remaining'), tile(amt ? fmt$(amt) : '—', 'requested'), tile(`${visits}/${await normFor(prType)}`, 'visits vs norm'), tile(fmt$(usage), 'used')];
       })(),
       actions: (link && amt > 0 ? [{ label: `✓ Approve ${fmt$(amt)}`, method: 'POST', path: `/provlinks/${link.id}/action`, body: { kind: 'addauth', amount: amt }, then: { method: 'POST', path: `/tasks/${t.id}/complete` }, style: 'primary' }] as any[] : [])
         .concat([{ label: 'Decline / discuss', method: 'POST', path: `/tasks/${t.id}/complete` }]),
@@ -397,7 +384,7 @@ api.get('/deck', (req, res) => {
   }
 
   // 4 · New referrals awaiting intake review (SLA clock)
-  for (const i of db.prepare(`SELECT * FROM intake_items WHERE kind='referral' AND status='triage'`).all() as any[]) {
+  for (const i of await q.all(`SELECT * FROM intake_items WHERE kind='referral' AND status='triage'`) as any[]) {
     cards.push({
       id: 'ref-' + i.id, type: '↪ New referral · SLA clock running', stripe: 'red', actor: 'handed',
       title: `Intake review — ${i.note || 'new referral'}`, patientId: i.patientId, patientName: i.patientId ? pName(i.patientId) : '—',
@@ -411,7 +398,7 @@ api.get('/deck', (req, res) => {
   }
 
   // 5 · Overdue tasks (non-auth-request)
-  for (const t of db.prepare(`SELECT * FROM tasks WHERE due IS NOT NULL AND due<? AND title NOT LIKE 'Auth request from%'`).all(today) as any[]) {
+  for (const t of await q.all(`SELECT * FROM tasks WHERE due IS NOT NULL AND due<? AND title NOT LIKE 'Auth request from%'`, today) as any[]) {
     if (!pidSet.has(t.patientId)) continue;
     cards.push({
       id: 'task-' + t.id, type: '◉ Overdue task', stripe: 'red', actor: 'you',
@@ -431,7 +418,7 @@ api.get('/deck', (req, res) => {
   // 6 · Authorization/coverage exceeded / nearly exhausted (containment reds)
   for (const p of myPts) {
     if (p.stage >= 4) continue;
-    const env = envelope(p.id);
+    const env = await envelope(p.id);
     if (!env.cap) continue;
     const remaining = env.remaining, usage = env.usage, outside = env.outside;
     const basisWord = env.basis === 'auth' ? 'carrier authorization' : 'coverage';
@@ -464,7 +451,7 @@ api.get('/deck', (req, res) => {
 
   // 7 · Receipts pending 14+ days (chase the carrier)
   const cutoff14 = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
-  for (const r of db.prepare(`SELECT * FROM receipts WHERE status='Pending' AND voided=0 AND date<?`).all(cutoff14) as any[]) {
+  for (const r of await q.all(`SELECT * FROM receipts WHERE status='Pending' AND voided=0 AND date<?`, cutoff14) as any[]) {
     if (!pidSet.has(r.patientId)) continue;
     cards.push({
       id: 'rcpt-' + r.id, type: '↪ Carrier payment aging', stripe: 'amber', actor: 'handed',
@@ -482,9 +469,9 @@ api.get('/deck', (req, res) => {
 
   // 8 · Portal access approvals (admin only)
   if (req.user!.role === 'admin') {
-    for (const u of db.prepare('SELECT * FROM users WHERE approved=0').all() as any[]) {
-      const orgName = (db.prepare('SELECT name FROM providers WHERE id=?').get(u.orgId) as any)?.name
-        || (db.prepare('SELECT name FROM insurers WHERE id=?').get(u.orgId) as any)?.name || u.orgId;
+    for (const u of await q.all('SELECT * FROM users WHERE approved=0') as any[]) {
+      const orgName = (await q.get('SELECT name FROM providers WHERE id=?', u.orgId) as any)?.name
+        || (await q.get('SELECT name FROM insurers WHERE id=?', u.orgId) as any)?.name || u.orgId;
       cards.push({
         id: 'appr-' + u.id, type: '◉ Portal access request', stripe: 'blue', actor: 'you',
         title: `${u.name} wants portal access`, patientId: null, patientName: orgName,
@@ -503,8 +490,8 @@ api.get('/deck', (req, res) => {
   }
 
   // 9 · Denied bills with no appeal decision
-  for (const b of db.prepare(`SELECT b.*, pr.name AS prName FROM bills b JOIN providers pr ON pr.id=b.providerId
-    WHERE b.denied=1 AND b.appealStatus='none' AND b.voided=0`).all() as any[]) {
+  for (const b of await q.all(`SELECT b.*, pr.name AS prName FROM bills b JOIN providers pr ON pr.id=b.providerId
+    WHERE b.denied=1 AND b.appealStatus='none' AND b.voided=0`) as any[]) {
     if (!pidSet.has(b.patientId)) continue;
     cards.push({
       id: 'deny-' + b.id, type: '◉ Denial · appeal decision', stripe: 'amber', actor: 'you',
@@ -522,8 +509,8 @@ api.get('/deck', (req, res) => {
   }
 
   // 10 · One-time agreements to chase (draft/sent)
-  for (const a of db.prepare(`SELECT a.*, p.name ptName FROM agreements a JOIN patients p ON p.id=a.patientId
-    WHERE a.status IN ('draft','sent')`).all() as any[]) {
+  for (const a of await q.all(`SELECT a.*, p.name ptName FROM agreements a JOIN patients p ON p.id=a.patientId
+    WHERE a.status IN ('draft','sent')`, ) as any[]) {
     if (!pidSet.has(a.patientId)) continue;
     cards.push({
       id: 'ota-' + a.id, type: '⎘ One-time agreement · ' + a.status, stripe: 'amber', actor: 'handed',
@@ -543,10 +530,10 @@ api.get('/deck', (req, res) => {
 
   // 11 · Recurring gap → worth a full contract (growth escalation, admin)
   if (req.user!.role === 'admin') {
-    for (const g of db.prepare(`SELECT providerName, COUNT(*) c, SUM(amount) amt FROM agreements
-      GROUP BY providerName HAVING c>=2`).all() as any[]) {
-      const already = db.prepare('SELECT 1 FROM crm_targets WHERE lower(name)=lower(?)').get(g.providerName)
-        || db.prepare('SELECT 1 FROM campaigns WHERE name=?').get(g.providerName);
+    for (const g of await q.all(`SELECT providerName, COUNT(*) c, SUM(amount) amt FROM agreements
+      GROUP BY providerName HAVING c>=2`, ) as any[]) {
+      const already = await q.get('SELECT 1 FROM crm_targets WHERE lower(name)=lower(?)', g.providerName)
+        || await q.get('SELECT 1 FROM campaigns WHERE name=?', g.providerName);
       if (already) continue;
       cards.push({
         id: 'gap-' + g.providerName.replace(/\W/g, ''), type: '⇗ Network gap · recurring', stripe: 'blue', actor: 'sys',
@@ -562,7 +549,7 @@ api.get('/deck', (req, res) => {
     }
 
     // 12 · Drift findings (admin)
-    for (const [i, d] of driftReport().entries()) {
+    for (const [i, d] of Object.entries(await driftReport())) {
       cards.push({
         id: 'drift-' + i, type: `◉ Drift · ${d.kind}`, stripe: 'amber', actor: 'sys',
         title: `${d.who} — ${d.kind} drift`, patientId: null, patientName: d.who,
@@ -576,7 +563,7 @@ api.get('/deck', (req, res) => {
     }
 
     // 12b · Fee benchmark pipeline failed (admin) — never silently serve stale rates
-    const lastFeeRef = db.prepare('SELECT * FROM fee_refreshes ORDER BY id DESC LIMIT 1').get() as any;
+    const lastFeeRef = await q.get('SELECT * FROM fee_refreshes ORDER BY id DESC LIMIT 1') as any;
     if (lastFeeRef?.status === 'failed') {
       cards.push({
         id: 'fee-' + lastFeeRef.id, type: '◉ Fee benchmark · refresh failed', stripe: 'red', actor: 'sys',
@@ -594,9 +581,9 @@ api.get('/deck', (req, res) => {
   // 13 · Cost-saver redirect: cheaper preferred equivalent exists for an active link
   for (const p of myPts) {
     if (p.stage >= 3) continue;
-    for (const l of db.prepare(`SELECT l.*, pr.name prName, pr.type prType FROM prov_links l
-      JOIN providers pr ON pr.id=l.providerId WHERE l.patientId=? AND l.status='authorized'`).all(p.id) as any[]) {
-      const ranked = rankProviders(l.prType, null);
+    for (const l of await q.all(`SELECT l.*, pr.name prName, pr.type prType FROM prov_links l
+      JOIN providers pr ON pr.id=l.providerId WHERE l.patientId=? AND l.status='authorized'`, p.id) as any[]) {
+      const ranked = await rankProviders(l.prType, null);
       const current = ranked.find(r => r.id === l.providerId);
       const better = ranked.find(r => r.id !== l.providerId && r.preferred && r.costProxy != null
         && current?.costProxy != null && r.costProxy < current.costProxy * 0.8);
@@ -620,8 +607,8 @@ api.get('/deck', (req, res) => {
   const d30 = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   for (const p of myPts) {
     if (p.stage !== 2) continue;
-    const recentBill = db.prepare('SELECT 1 FROM bills WHERE patientId=? AND voided=0 AND dos>=?').get(p.id, d30);
-    const upcoming = db.prepare('SELECT 1 FROM appointments WHERE patientId=? AND whenAt>=?').get(p.id, today);
+    const recentBill = await q.get('SELECT 1 FROM bills WHERE patientId=? AND voided=0 AND dos>=?', p.id, d30);
+    const upcoming = await q.get('SELECT 1 FROM appointments WHERE patientId=? AND whenAt>=?', p.id, today);
     if (recentBill || upcoming) continue;
     cards.push({
       id: 'stat-' + p.id, type: '◈ Auto-status · discharge signal', stripe: 'blue', actor: 'sys',
@@ -650,7 +637,7 @@ api.get('/deck', (req, res) => {
 
   // Overnight receipts from the audit trail (last 24h)
   const since = new Date(Date.now() - 86400000).toISOString();
-  const recent = db.prepare('SELECT * FROM audit_log WHERE time>? ORDER BY id DESC LIMIT 200').all(since) as any[];
+  const recent = await q.all('SELECT * FROM audit_log WHERE time>? ORDER BY id DESC LIMIT 200', since) as any[];
   const FRIENDLY: Record<string, string> = {
     'bill.pay': 'released a provider payment', 'bill.create': 'filed a bill', 'bill.attach.bill': 'attached a bill document',
     'bill.attach.note': 'attached a visit note', 'note.add': 'logged a note', 'task.create': 'created a task',
@@ -680,152 +667,148 @@ api.get('/deck', (req, res) => {
 });
 
 /* ================= carrier partnership configuration (the digitized onboarding packet) ================= */
-api.get('/insurers/:id/onboarding', (req, res) => {
-  const c = db.prepare('SELECT onboarding FROM insurers WHERE id=?').get(req.params.id) as any;
+api.get('/insurers/:id/onboarding', async (req, res) => {
+  const c = await q.get('SELECT onboarding FROM insurers WHERE id=?', req.params.id) as any;
   if (!c) return res.status(404).json({ error: 'Not found' });
   res.json(c.onboarding ? JSON.parse(c.onboarding) : {});
 });
-api.post('/insurers/:id/onboarding', (req, res) => {
-  const c = db.prepare('SELECT id,name FROM insurers WHERE id=?').get(req.params.id) as any;
+api.post('/insurers/:id/onboarding', async (req, res) => {
+  const c = await q.get('SELECT id,name FROM insurers WHERE id=?', req.params.id) as any;
   if (!c) return res.status(404).json({ error: 'Not found' });
   const cfg = req.body || {};
   cfg._meta = { savedBy: req.user!.name, savedAt: nowMST(), role: req.user!.role };
-  db.prepare('UPDATE insurers SET onboarding=? WHERE id=?').run(JSON.stringify(cfg), c.id);
-  audit(req.user!, 'insurer.onboarding.save', 'insurer', c.id, `${Object.keys(cfg).length} sections`);
+  await q.run('UPDATE insurers SET onboarding=? WHERE id=?', JSON.stringify(cfg), c.id);
+  await audit(req.user!, 'insurer.onboarding.save', 'insurer', c.id, `${Object.keys(cfg).length} sections`);
   res.json({ ok: true });
 });
 /* ================= phase 4-6 engines ================= */
 
 /* Four-check verdicts + health + strip extras for one case (staff-only; never portal). */
-api.get('/patients/:id/insights', (req, res) => {
-  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(req.params.id) as any;
+api.get('/patients/:id/insights', async (req, res) => {
+  const p = await q.get('SELECT * FROM patients WHERE id=?', req.params.id) as any;
   if (!p) return res.status(404).json({ error: 'Not found' });
-  const dups = duplicateBillIds(p.id);
+  const dups = await duplicateBillIds(p.id);
   const checks: Record<string, any> = {};
-  for (const b of db.prepare('SELECT * FROM bills WHERE patientId=?').all(p.id) as any[])
-    checks[b.id] = { ...billChecks(b), dup: dups.has(b.id) };
-  res.json({ checks, health: caseHealth(p), strip: stripExtras(p), tier: p.insurerId ? carrierTier(p.insurerId).tier : null });
+  for (const b of await q.all('SELECT * FROM bills WHERE patientId=?', p.id) as any[])
+    checks[b.id] = { ...await billChecks(b), dup: dups.has(b.id) };
+  res.json({ checks, health: await caseHealth(p), strip: await stripExtras(p), tier: p.insurerId ? (await carrierTier(p.insurerId)).tier : null });
 });
 
 /* Health summaries for the roster. */
-api.get('/health-summaries', (_req, res) => {
+api.get('/health-summaries', async (_req, res) => {
   const out: Record<string, any> = {};
-  for (const p of db.prepare('SELECT * FROM patients').all() as any[]) {
-    const h = caseHealth(p);
+  for (const p of await q.all('SELECT * FROM patients') as any[]) {
+    const h = await caseHealth(p);
     out[p.id] = { score: h.score, band: h.band, status: h.status, redCount: h.reds.length };
   }
   res.json(out);
 });
 
 /* Exception fix: reduce billed to the contracted price. */
-api.post('/bills/:bid/reduce-to-contract', (req, res) => {
-  const b = db.prepare('SELECT * FROM bills WHERE id=?').get(req.params.bid) as any;
+api.post('/bills/:bid/reduce-to-contract', async (req, res) => {
+  const b = await q.get('SELECT * FROM bills WHERE id=?', req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   if (!(b.revenue > 0) || b.billed <= b.revenue) return res.status(400).json({ error: 'Nothing to reduce — billed is at or under contract' });
   const old = b.billed;
-  db.prepare('UPDATE bills SET billed=? WHERE id=?').run(b.revenue, b.id);
-  db.prepare('UPDATE prov_links SET billed=billed-? WHERE patientId=? AND providerId=?').run(old - b.revenue, b.patientId, b.providerId);
-  const prName = (db.prepare('SELECT name FROM providers WHERE id=?').get(b.providerId) as any)?.name || b.providerId;
-  addNote(b.patientId, `Bill reduced to contracted rate: ${prName} DOS ${fmtDate(b.dos)} — ${fmt$(old)} → ${fmt$(b.revenue)} (contract is the price)`, req.user!.name);
-  audit(req.user!, 'bill.reduceToContract', 'bill', b.id, `${old} -> ${b.revenue}`);
-  sendPatient(req, res, b.patientId);
+  await q.run('UPDATE bills SET billed=? WHERE id=?', b.revenue, b.id);
+  await q.run('UPDATE prov_links SET billed=billed-? WHERE patientId=? AND providerId=?', old - b.revenue, b.patientId, b.providerId);
+  const prName = (await q.get('SELECT name FROM providers WHERE id=?', b.providerId) as any)?.name || b.providerId;
+  await addNote(b.patientId, `Bill reduced to contracted rate: ${prName} DOS ${fmtDate(b.dos)} — ${fmt$(old)} → ${fmt$(b.revenue)} (contract is the price)`, req.user!.name);
+  await audit(req.user!, 'bill.reduceToContract', 'bill', b.id, `${old} -> ${b.revenue}`);
+  await sendPatient(req, res, b.patientId);
 });
 
 /* EOB capture (Trilopay side). */
-api.post('/bills/:bid/eob', (req, res) => {
-  const b = db.prepare('SELECT * FROM bills WHERE id=?').get(req.params.bid) as any;
+api.post('/bills/:bid/eob', async (req, res) => {
+  const b = await q.get('SELECT * FROM bills WHERE id=?', req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   const v = req.body || {};
-  db.prepare('UPDATE bills SET eobAllowed=?, eobPaid=?, eobNote=?, eobAt=? WHERE id=?')
-    .run(Number(v.allowed) || null, Number(v.paid) || null, v.note || null, nowMST(), b.id);
-  addNote(b.patientId, `EOB recorded on DOS ${fmtDate(b.dos)}: allowed ${fmt$(Number(v.allowed) || 0)} · paid ${fmt$(Number(v.paid) || 0)}${v.note ? ' — ' + v.note : ''}`, req.user!.name);
-  audit(req.user!, 'bill.eob', 'bill', b.id);
-  sendPatient(req, res, b.patientId);
+  await q.run('UPDATE bills SET eobAllowed=?, eobPaid=?, eobNote=?, eobAt=? WHERE id=?', Number(v.allowed) || null, Number(v.paid) || null, v.note || null, nowMST(), b.id);
+  await addNote(b.patientId, `EOB recorded on DOS ${fmtDate(b.dos)}: allowed ${fmt$(Number(v.allowed) || 0)} · paid ${fmt$(Number(v.paid) || 0)}${v.note ? ' — ' + v.note : ''}`, req.user!.name);
+  await audit(req.user!, 'bill.eob', 'bill', b.id);
+  await sendPatient(req, res, b.patientId);
 });
 
 /* One-time agreements. */
-api.get('/agreements', (_req, res) => {
-  res.json(db.prepare(`SELECT a.*, p.name ptName FROM agreements a JOIN patients p ON p.id=a.patientId ORDER BY a.id DESC`).all());
+api.get('/agreements', async (_req, res) => {
+  res.json(await q.all(`SELECT a.*, p.name ptName FROM agreements a JOIN patients p ON p.id=a.patientId ORDER BY a.id DESC`));
 });
-api.post('/agreements', (req, res) => {
+api.post('/agreements', async (req, res) => {
   const v = req.body || {};
   if (!v.patientId || !String(v.providerName || '').trim()) return res.status(400).json({ error: 'patientId and providerName required' });
-  const dupe = db.prepare(`SELECT 1 FROM agreements WHERE patientId=? AND providerName=? AND status IN ('draft','sent')`).get(v.patientId, v.providerName);
+  const dupe = await q.get(`SELECT 1 FROM agreements WHERE patientId=? AND providerName=? AND status IN ('draft','sent')`, v.patientId, v.providerName);
   if (dupe) return res.status(409).json({ error: 'An open agreement with this provider already exists on this case' });
-  const info = db.prepare(`INSERT INTO agreements(patientId,providerId,providerName,service,amount,terms,status,createdAt,createdBy)
-    VALUES(?,?,?,?,?,?,'draft',?,?)`)
-    .run(v.patientId, v.providerId || null, v.providerName, v.service || null, Number(v.amount) || 0,
+  const info = await q.run(`INSERT INTO agreements(patientId,providerId,providerName,service,amount,terms,status,createdAt,createdBy)
+    VALUES(?,?,?,?,?,?,'draft',?,?)`, v.patientId, v.providerId || null, v.providerName, v.service || null, Number(v.amount) || 0,
       v.terms || `One-time agreement: services at ${Number(v.amount) ? fmt$(Number(v.amount)) : 'negotiated rate'}, payment within 30 days of clean bill + records, no balance billing.`,
       nowMST(), req.user!.name);
-  addNote(v.patientId, `One-time agreement started with ${v.providerName}${v.amount ? ' · ' + fmt$(Number(v.amount)) : ''} — locks the rate before payment (four-check #4)`, req.user!.name);
-  audit(req.user!, 'agreement.create', 'agreement', String(info.lastInsertRowid), v.providerName);
+  await addNote(v.patientId, `One-time agreement started with ${v.providerName}${v.amount ? ' · ' + fmt$(Number(v.amount)) : ''} — locks the rate before payment (four-check #4)`, req.user!.name);
+  await audit(req.user!, 'agreement.create', 'agreement', String(info.lastInsertRowid), v.providerName);
   res.json({ ok: true, id: info.lastInsertRowid });
 });
-api.post('/agreements/:id/status', (req, res) => {
-  const a = db.prepare('SELECT * FROM agreements WHERE id=?').get(req.params.id) as any;
+api.post('/agreements/:id/status', async (req, res) => {
+  const a = await q.get('SELECT * FROM agreements WHERE id=?', req.params.id) as any;
   if (!a) return res.status(404).json({ error: 'Not found' });
   const status = String(req.body?.status);
   if (!['sent', 'signed', 'declined'].includes(status)) return res.status(400).json({ error: 'Bad status' });
-  db.prepare('UPDATE agreements SET status=?, signedAt=? WHERE id=?').run(status, status === 'signed' ? nowMST() : a.signedAt, a.id);
-  addNote(a.patientId, `One-time agreement with ${a.providerName}: ${status}${status === 'signed' ? ' — payments to this provider unblocked' : ''}`, req.user!.name);
-  audit(req.user!, 'agreement.status', 'agreement', String(a.id), status);
+  await q.run('UPDATE agreements SET status=?, signedAt=? WHERE id=?', status, status === 'signed' ? nowMST() : a.signedAt, a.id);
+  await addNote(a.patientId, `One-time agreement with ${a.providerName}: ${status}${status === 'signed' ? ' — payments to this provider unblocked' : ''}`, req.user!.name);
+  await audit(req.user!, 'agreement.status', 'agreement', String(a.id), status);
   res.json({ ok: true });
 });
 
 /* Provider optimizer. */
-api.get('/optimizer', (req, res) => {
+api.get('/optimizer', async (req, res) => {
   const type = (req.query.type as string) || null;
-  const pt = req.query.patientId ? db.prepare('SELECT address FROM patients WHERE id=?').get(req.query.patientId) as any : null;
-  res.json(rankProviders(type, pt?.address || null));
+  const pt = req.query.patientId ? await q.get('SELECT address FROM patients WHERE id=?', req.query.patientId) as any : null;
+  res.json(await rankProviders(type, pt?.address || null));
 });
 
 /* Consolidated daily outbound. */
-api.get('/outbound', (_req, res) => res.json(outboundDrafts()));
-api.post('/outbound/send', (req, res) => {
+api.get('/outbound', async (_req, res) => res.json(await outboundDrafts()));
+api.post('/outbound/send', async (req, res) => {
   const v = req.body || {};
   for (const pid of v.patientIds || []) {
-    db.prepare('INSERT INTO sent_docs(patientId,name,toStr,time,status,method) VALUES(?,?,?,?,?,?)')
-      .run(pid, `Daily consolidated update — ${v.subject || 'status'}`, v.toName || '', nowMST(), 'Sent', 'Email');
-    addNote(pid, `Consolidated daily outbound sent to ${v.toName}: ${v.subject}`, req.user!.name);
+    await q.run('INSERT INTO sent_docs(patientId,name,toStr,time,status,method) VALUES(?,?,?,?,?,?)', pid, `Daily consolidated update — ${v.subject || 'status'}`, v.toName || '', nowMST(), 'Sent', 'Email');
+    await addNote(pid, `Consolidated daily outbound sent to ${v.toName}: ${v.subject}`, req.user!.name);
   }
-  audit(req.user!, 'outbound.send', v.kind, v.toId, v.subject);
+  await audit(req.user!, 'outbound.send', v.kind, v.toId, v.subject);
   res.json({ ok: true });
 });
 
 /* Scheduling board. */
-api.get('/schedule', (_req, res) => {
+api.get('/schedule', async (_req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const horizon = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
-  const upcoming = db.prepare(`SELECT a.*, p.name ptName, pr.name prName FROM appointments a
+  const upcoming = await q.all(`SELECT a.*, p.name ptName, pr.name prName FROM appointments a
     JOIN patients p ON p.id=a.patientId LEFT JOIN providers pr ON pr.id=a.providerId
-    WHERE a.whenAt>=? AND a.whenAt<=? ORDER BY a.whenAt`).all(today, horizon);
-  const gaps = (db.prepare(`SELECT p.* FROM patients p WHERE p.stage=2`).all() as any[])
-    .filter(p => !db.prepare('SELECT 1 FROM appointments WHERE patientId=? AND whenAt>=?').get(p.id, today))
-    .map(p => ({ id: p.id, name: p.name, caseType: p.caseType, coordinator: p.coordinator }));
+    WHERE a.whenAt>=? AND a.whenAt<=? ORDER BY a.whenAt`, today, horizon);
+  const gaps = await Promise.all((await q.all(`SELECT p.* FROM patients p WHERE p.stage=2`) as any[])
+    .filter(async p => !await q.get('SELECT 1 FROM appointments WHERE patientId=? AND whenAt>=?', p.id, today))
+    .map(async p => ({ id: p.id, name: p.name, caseType: p.caseType, coordinator: p.coordinator })));
   res.json({ upcoming, gaps });
 });
-api.post('/patients/:id/appointments', (req, res) => {
+api.post('/patients/:id/appointments', async (req, res) => {
   const v = req.body || {};
   if (!v.whenAt) return res.status(400).json({ error: 'Date required' });
-  db.prepare('INSERT INTO appointments(patientId,providerId,whenAt,note,createdBy,createdAt) VALUES(?,?,?,?,?,?)')
-    .run(req.params.id, v.providerId || null, v.whenAt, v.note || null, req.user!.name, nowMST());
-  addNote(req.params.id, `Appointment scheduled ${fmtDate(v.whenAt)}${v.note ? ' — ' + v.note : ''}`, req.user!.name);
-  audit(req.user!, 'appointment.create', 'patient', req.params.id);
-  sendPatient(req, res, req.params.id);
+  await q.run('INSERT INTO appointments(patientId,providerId,whenAt,note,createdBy,createdAt) VALUES(?,?,?,?,?,?)', req.params.id, v.providerId || null, v.whenAt, v.note || null, req.user!.name, nowMST());
+  await addNote(req.params.id, `Appointment scheduled ${fmtDate(v.whenAt)}${v.note ? ' — ' + v.note : ''}`, req.user!.name);
+  await audit(req.user!, 'appointment.create', 'patient', req.params.id);
+  await sendPatient(req, res, req.params.id);
 });
 
 /* Growth workspace. */
-api.get('/growth', requireAdmin, (_req, res) => {
+api.get('/growth', requireAdmin, async (req, res) => {
   const d30 = new Date(Date.now() - 30 * 86400000).toISOString();
   const d30d = d30.slice(0, 10);
-  const coldCarriers = (db.prepare('SELECT id,name FROM insurers').all() as any[])
-    .filter(c => !(db.prepare('SELECT 1 FROM patients WHERE insurerId=? AND createdAt>=?').get(c.id, d30)))
-    .map(c => ({ ...c, why: 'No new referrals in 30 days' }));
-  const coldProviders = (db.prepare('SELECT id,name,type FROM providers').all() as any[])
-    .filter(pr => !(db.prepare('SELECT 1 FROM bills WHERE providerId=? AND dos>=? AND voided=0').get(pr.id, d30d)))
-    .map(pr => ({ ...pr, why: 'No bills in 30 days — relationship cooling' }));
-  const gaps = db.prepare(`SELECT providerName, COUNT(*) c, SUM(amount) amt FROM agreements GROUP BY providerName ORDER BY c DESC`).all();
-  const campaigns = db.prepare('SELECT * FROM campaigns ORDER BY id DESC').all();
+  const coldCarriers = await Promise.all((await q.all('SELECT id,name FROM insurers') as any[])
+    .filter(async c => !(await q.get('SELECT 1 FROM patients WHERE insurerId=? AND createdAt>=?', c.id, d30)))
+    .map(async c => ({ ...c, why: 'No new referrals in 30 days' })));
+  const coldProviders = await Promise.all((await q.all('SELECT id,name,type FROM providers') as any[])
+    .filter(async pr => !(await q.get('SELECT 1 FROM bills WHERE providerId=? AND dos>=? AND voided=0', pr.id, d30d)))
+    .map(async pr => ({ ...pr, why: 'No bills in 30 days — relationship cooling' })));
+  const gaps = await q.all(`SELECT providerName, COUNT(*) c, SUM(amount) amt FROM agreements GROUP BY providerName ORDER BY c DESC`, );
+  const campaigns = await q.all('SELECT * FROM campaigns ORDER BY id DESC');
   const queue = [
     ...coldCarriers.map(c => ({ kind: 'carrier', id: c.id, name: c.name, why: c.why, priority: 2 })),
     ...(gaps as any[]).filter(g => g.c >= 2).map(g => ({ kind: 'gap', id: g.providerName, name: g.providerName, why: `${g.c} one-time agreements — contract candidate`, priority: 1 })),
@@ -833,74 +816,72 @@ api.get('/growth', requireAdmin, (_req, res) => {
   ].sort((a, b) => a.priority - b.priority);
   res.json({ queue, campaigns, gaps, coldCarriers, coldProviders });
 });
-api.post('/campaigns', (req, res) => {
+api.post('/campaigns', async (req, res) => {
   const v = req.body || {};
   if (!String(v.name || '').trim()) return res.status(400).json({ error: 'Name required' });
-  const info = db.prepare('INSERT INTO campaigns(name,kind,region,stage,contact,notes,updatedAt,by) VALUES(?,?,?,?,?,?,?,?)')
-    .run(v.name, v.kind || 'carrier', v.region || null, v.stage || 'identify', v.contact || null, v.notes || null, nowMST(), req.user!.name);
-  audit(req.user!, 'campaign.create', 'campaign', String(info.lastInsertRowid), v.name);
+  const info = await q.run('INSERT INTO campaigns(name,kind,region,stage,contact,notes,updatedAt,by) VALUES(?,?,?,?,?,?,?,?)', v.name, v.kind || 'carrier', v.region || null, v.stage || 'identify', v.contact || null, v.notes || null, nowMST(), req.user!.name);
+  await audit(req.user!, 'campaign.create', 'campaign', String(info.lastInsertRowid), v.name);
   res.json({ ok: true, id: info.lastInsertRowid });
 });
-api.post('/campaigns/:id', (req, res) => {
-  const c = db.prepare('SELECT * FROM campaigns WHERE id=?').get(req.params.id) as any;
+api.post('/campaigns/:id', async (req, res) => {
+  const c = await q.get('SELECT * FROM campaigns WHERE id=?', req.params.id) as any;
   if (!c) return res.status(404).json({ error: 'Not found' });
   const v = req.body || {};
-  db.prepare('UPDATE campaigns SET stage=?, notes=?, contact=?, region=?, updatedAt=?, by=? WHERE id=?')
-    .run(v.stage || c.stage, v.notes ?? c.notes, v.contact ?? c.contact, v.region ?? c.region, nowMST(), req.user!.name, c.id);
-  audit(req.user!, 'campaign.update', 'campaign', String(c.id), v.stage || '');
+  await q.run('UPDATE campaigns SET stage=?, notes=?, contact=?, region=?, updatedAt=?, by=? WHERE id=?', v.stage || c.stage, v.notes ?? c.notes, v.contact ?? c.contact, v.region ?? c.region, nowMST(), req.user!.name, c.id);
+  await audit(req.user!, 'campaign.update', 'campaign', String(c.id), v.stage || '');
   res.json({ ok: true });
 });
 
 /* Drift, tiers, scores, enterprise report. */
-api.get('/drift', requireAdmin, (_req, res) => res.json(driftReport()));
-api.post('/drift/ack', (req, res) => {
-  audit(req.user!, 'drift.ack', 'drift', undefined, req.body?.text);
+api.get('/drift', requireAdmin, async (req, res) => res.json(await driftReport()));
+api.post('/drift/ack', async (req, res) => {
+  await audit(req.user!, 'drift.ack', 'drift', undefined, req.body?.text);
   res.json({ ok: true });
 });
-api.get('/insurers/:id/tier', (req, res) => res.json(carrierTier(req.params.id)));
-api.get('/providers/:id/score', (req, res) => res.json(providerScore(req.params.id)));
-api.get('/insurers/:id/report', (req, res) => {
-  const c = db.prepare('SELECT id,name FROM insurers WHERE id=?').get(req.params.id) as any;
+api.get('/insurers/:id/tier', async (req, res) => res.json(await carrierTier(req.params.id)));
+api.get('/providers/:id/score', async (req, res) => res.json(await providerScore(req.params.id)));
+api.get('/insurers/:id/report', async (req, res) => {
+  const c = await q.get('SELECT id,name FROM insurers WHERE id=?', req.params.id) as any;
   if (!c) return res.status(404).json({ error: 'Not found' });
-  res.json({ carrier: c.name, ...carrierReport(c.id), tier: carrierTier(c.id) });
+  res.json({ carrier: c.name, ...await carrierReport(c.id), tier: await carrierTier(c.id) });
 });
 
-api.get('/roster/patients', (_req, res) => {
-  res.json(db.prepare(`SELECT p.id, p.name, p.caseType, p.stage, p.coordinator, p.doi, p.insurerId,
+api.get('/roster/patients', async (_req, res) => {
+  res.json(await q.all(`SELECT p.id, p.name, p.caseType, p.stage, p.coordinator, p.doi, p.insurerId,
     (SELECT COUNT(*) FROM tasks t WHERE t.patientId=p.id) AS openTasks,
     (SELECT COUNT(*) FROM bills b WHERE b.patientId=p.id AND b.status='unpaid' AND b.voided=0) AS unpaidBills
-    FROM patients p`).all());
+    FROM patients p`, ));
 });
 
-api.get('/dashboard', requireAdmin, (_req, res) => {
-  const payable = (db.prepare("SELECT COALESCE(SUM(rate),0) s, COUNT(*) c FROM bills WHERE status='unpaid' AND voided=0 AND rate>0").get() as any);
-  const pendingIn = (db.prepare("SELECT COALESCE(SUM(amount),0) s, COUNT(*) c FROM receipts WHERE status='Pending' AND voided=0").get() as any);
-  const received = (db.prepare("SELECT COALESCE(SUM(amount),0) s FROM receipts WHERE status='Cleared' AND voided=0").get() as any).s;
-  const paid = (db.prepare("SELECT COALESCE(SUM(rate),0) s FROM bills WHERE status='paid' AND voided=0").get() as any).s;
+api.get('/dashboard', requireAdmin, async (req, res) => {
+  const payable = (await q.get("SELECT COALESCE(SUM(rate),0) s, COUNT(*) c FROM bills WHERE status='unpaid' AND voided=0 AND rate>0", ) as any);
+  const pendingIn = (await q.get("SELECT COALESCE(SUM(amount),0) s, COUNT(*) c FROM receipts WHERE status='Pending' AND voided=0", ) as any);
+  const received = (await q.get("SELECT COALESCE(SUM(amount),0) s FROM receipts WHERE status='Cleared' AND voided=0", ) as any).s;
+  const paid = (await q.get("SELECT COALESCE(SUM(rate),0) s FROM bills WHERE status='paid' AND voided=0", ) as any).s;
   const cutoff = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-  const aging = (db.prepare("SELECT COALESCE(SUM(rate),0) s, COUNT(*) c FROM bills WHERE status='unpaid' AND voided=0 AND dos < ?").get(cutoff) as any);
-  const byStage = db.prepare('SELECT stage, COUNT(*) c FROM patients GROUP BY stage').all();
-  const byCarrier = (db.prepare('SELECT id, name FROM insurers').all() as any[]).map(c => ({ id: c.id, name: c.name, ...insAutoStats(c.id) }));
-  const byCaseType = db.prepare(`SELECT caseType, COUNT(*) c FROM patients WHERE stage<4 GROUP BY caseType`).all();
-  const coordinators = (db.prepare('SELECT id, name FROM users WHERE active=1').all() as any[]).map(u => ({
+  const aging = (await q.get("SELECT COALESCE(SUM(rate),0) s, COUNT(*) c FROM bills WHERE status='unpaid' AND voided=0 AND dos < ?", cutoff) as any);
+  const byStage = await q.all('SELECT stage, COUNT(*) c FROM patients GROUP BY stage', );
+  const byCarrier = await Promise.all((await q.all('SELECT id, name FROM insurers') as any[]).map(async c => ({ id: c.id, name: c.name, ...await insAutoStats(c.id) })));
+  const byCaseType = await q.all(`SELECT caseType, COUNT(*) c FROM patients WHERE stage<4 GROUP BY caseType`, );
+  const coordinators = (await Promise.all((await q.all('SELECT id, name FROM users WHERE active=1') as any[]).map(async u => ({
     id: u.id, name: u.name,
-    activeCases: (db.prepare('SELECT COUNT(*) c FROM patients WHERE coordinator=? AND stage<4').get(u.id) as any).c,
-    openTasks: (db.prepare('SELECT COUNT(*) c FROM tasks t JOIN patients p ON p.id=t.patientId WHERE p.coordinator=?').get(u.id) as any).c,
-  })).filter(x => x.activeCases || x.openTasks);
+    activeCases: (await q.get('SELECT COUNT(*) c FROM patients WHERE coordinator=? AND stage<4', u.id) as any).c,
+    openTasks: (await q.get('SELECT COUNT(*) c FROM tasks t JOIN patients p ON p.id=t.patientId WHERE p.coordinator=?', u.id) as any).c,
+  })))).filter(x => x.activeCases || x.openTasks);
   // Thesis metrics
-  const ptCount = (db.prepare('SELECT COUNT(*) c FROM patients').get() as any).c;
-  const attyCount = (db.prepare('SELECT COUNT(*) c FROM patients WHERE attorneyRetained=1').get() as any).c;
+  const ptCount = (await q.get('SELECT COUNT(*) c FROM patients') as any).c;
+  const attyCount = (await q.get('SELECT COUNT(*) c FROM patients WHERE attorneyRetained=1') as any).c;
   // Avg days intake → treating from stage timestamps
-  const velocityRows = db.prepare(`SELECT s0.patientId, julianday(s2.at)-julianday(s0.at) AS days
+  const velocityRows = await q.all(`SELECT s0.patientId, (s2.at::date - s0.at::date) AS days
     FROM stage_times s0 JOIN stage_times s2 ON s2.patientId=s0.patientId AND s2.stage=2
-    WHERE s0.stage=0`).all() as any[];
+    WHERE s0.stage=0`, ) as any[];
   const avgIntakeToTreating = velocityRows.length
     ? Math.round(velocityRows.reduce((s, r) => s + r.days, 0) / velocityRows.length * 10) / 10 : null;
-  const byCarrierAR = byCarrier.map((c: any) => {
-    const billedTotal = (db.prepare(`SELECT COALESCE(SUM(b.billed),0) s FROM bills b
-      JOIN patients p ON p.id=b.patientId WHERE p.insurerId=? AND b.voided=0`).get(c.id) as any).s;
+  const byCarrierAR = await Promise.all(byCarrier.map(async (c: any) => {
+    const billedTotal = (await q.get(`SELECT COALESCE(SUM(b.billed),0) s FROM bills b
+      JOIN patients p ON p.id=b.patientId WHERE p.insurerId=? AND b.voided=0`, c.id) as any).s;
     return { ...c, billedTotal, outstanding: Math.max(0, billedTotal - c.received) };
-  });
+  }));
   res.json({
     payable: payable.s, payableCount: payable.c,
     pendingIn: pendingIn.s, pendingInCount: pendingIn.c,
@@ -911,57 +892,57 @@ api.get('/dashboard', requireAdmin, (_req, res) => {
     attorneyRate: ptCount ? Math.round((attyCount / ptCount) * 1000) / 10 : 0,
     attorneyCount: attyCount, patientCount: ptCount,
     avgIntakeToTreating,
-    intakeQueue: (db.prepare("SELECT COUNT(*) c FROM intake_items WHERE status IN ('triage','queued')").get() as any).c,
-    pendingApprovals: (db.prepare('SELECT COUNT(*) c FROM users WHERE approved=0').get() as any).c,
+    intakeQueue: (await q.get("SELECT COUNT(*) c FROM intake_items WHERE status IN ('triage','queued')", ) as any).c,
+    pendingApprovals: (await q.get('SELECT COUNT(*) c FROM users WHERE approved=0') as any).c,
     // Board pack extras
-    byLob: (db.prepare(`SELECT p.caseType, COALESCE(SUM(CASE WHEN r.status='Cleared' AND r.voided=0 THEN r.amount END),0) recv
-      FROM patients p LEFT JOIN receipts r ON r.patientId=p.id GROUP BY p.caseType`).all() as any[]).map((x: any) => {
-      const paidL = (db.prepare(`SELECT COALESCE(SUM(b.rate),0) s FROM bills b JOIN patients p ON p.id=b.patientId
-        WHERE p.caseType=? AND b.status='paid' AND b.voided=0`).get(x.caseType) as any).s;
+    byLob: await Promise.all((await q.all(`SELECT p.caseType, COALESCE(SUM(CASE WHEN r.status='Cleared' AND r.voided=0 THEN r.amount END),0) recv
+      FROM patients p LEFT JOIN receipts r ON r.patientId=p.id GROUP BY p.caseType`, ) as any[]).map(async (x: any) => {
+      const paidL = (await q.get(`SELECT COALESCE(SUM(b.rate),0) s FROM bills b JOIN patients p ON p.id=b.patientId
+        WHERE p.caseType=? AND b.status='paid' AND b.voided=0`, x.caseType) as any).s;
       return { caseType: x.caseType, received: x.recv, paidOut: paidL, margin: x.recv - paidL };
-    }),
-    costPerCase: (() => {
-      const closed = db.prepare('SELECT COUNT(*) c FROM patients WHERE stage>=3').get() as any;
-      const totBilled = (db.prepare(`SELECT COALESCE(SUM(b.billed),0) s FROM bills b JOIN patients p ON p.id=b.patientId WHERE p.stage>=3 AND b.voided=0`).get() as any).s;
+    })),
+    costPerCase: await (async () => {
+      const closed = await q.get('SELECT COUNT(*) c FROM patients WHERE stage>=3') as any;
+      const totBilled = (await q.get(`SELECT COALESCE(SUM(b.billed),0) s FROM bills b JOIN patients p ON p.id=b.patientId WHERE p.stage>=3 AND b.voided=0`, ) as any).s;
       return closed.c ? Math.round(totBilled / closed.c) : null;
     })(),
-    concentration: (() => {
-      const rows = db.prepare(`SELECT p.insurerId, COALESCE(SUM(r.amount),0) s FROM receipts r JOIN patients p ON p.id=r.patientId
-        WHERE r.voided=0 GROUP BY p.insurerId ORDER BY s DESC`).all() as any[];
+    concentration: await (async () => {
+      const rows = await q.all(`SELECT p.insurerId, COALESCE(SUM(r.amount),0) s FROM receipts r JOIN patients p ON p.id=r.patientId
+        WHERE r.voided=0 GROUP BY p.insurerId ORDER BY s DESC`, ) as any[];
       const tot = rows.reduce((s, r) => s + r.s, 0);
       return tot && rows[0] ? Math.round(rows[0].s / tot * 100) : null;
     })(),
-    writtenOff: (db.prepare(`SELECT COALESCE(SUM(billed),0) s, COUNT(*) c FROM bills WHERE appealStatus='written-off' AND voided=0`).get() as any),
-    driftCount: driftReport().length,
+    writtenOff: (await q.get(`SELECT COALESCE(SUM(billed),0) s, COUNT(*) c FROM bills WHERE appealStatus='written-off' AND voided=0`, ) as any),
+    driftCount: (await driftReport()).length,
   });
 });
 
-api.get('/alerts', (req, res) => {
+api.get('/alerts', async (req, res) => {
   const mine = req.user!.role === 'coordinator';
-  const pts = (db.prepare('SELECT * FROM patients' + (mine ? ' WHERE coordinator=?' : '')).all(...(mine ? [req.user!.id] : [])) as any[]);
+  const pts = (await q.all('SELECT * FROM patients' + (mine ? ' WHERE coordinator=?' : ''), ...(mine ? [req.user!.id] : [])) as any[]);
   const today = new Date().toISOString().slice(0, 10);
   const cutoff30 = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const cutoff14 = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
   const alerts: any[] = [];
   if (req.user!.role === 'admin') {
-    const lastFeeRef = db.prepare('SELECT * FROM fee_refreshes ORDER BY id DESC LIMIT 1').get() as any;
+    const lastFeeRef = await q.get('SELECT * FROM fee_refreshes ORDER BY id DESC LIMIT 1') as any;
     if (lastFeeRef?.status === 'failed')
       alerts.push({ severity: 'high', patientId: 'FEES', patientName: 'Fee tool', text: `Medicare fee refresh failed: ${String(lastFeeRef.detail || '').slice(0, 90)}` });
   }
   for (const p of pts) {
-    for (const t of db.prepare('SELECT * FROM tasks WHERE patientId=? AND due IS NOT NULL AND due<?').all(p.id, today) as any[])
+    for (const t of await q.all('SELECT * FROM tasks WHERE patientId=? AND due IS NOT NULL AND due<?', p.id, today) as any[])
       alerts.push({ severity: 'high', patientId: p.id, patientName: p.name, text: `Overdue task: "${t.title}" (due ${fmtDate(t.due)})` });
-    for (const b of db.prepare("SELECT * FROM bills WHERE patientId=? AND status='unpaid' AND voided=0 AND dos<?").all(p.id, cutoff30) as any[])
+    for (const b of await q.all("SELECT * FROM bills WHERE patientId=? AND status='unpaid' AND voided=0 AND dos<?", p.id, cutoff30) as any[])
       alerts.push({ severity: 'high', patientId: p.id, patientName: p.name, text: `Bill unpaid 30+ days: DOS ${fmtDate(b.dos)} · ${fmt$(b.billed)}` });
-    for (const r of db.prepare("SELECT * FROM receipts WHERE patientId=? AND status='Pending' AND voided=0 AND date<?").all(p.id, cutoff14) as any[])
+    for (const r of await q.all("SELECT * FROM receipts WHERE patientId=? AND status='Pending' AND voided=0 AND date<?", p.id, cutoff14) as any[])
       alerts.push({ severity: 'med', patientId: p.id, patientName: p.name, text: `Receipt pending 14+ days: ${fmt$(r.amount)} (${r.ref || ''})` });
     // Carrier-configured thresholds (from the partnership onboarding — config that executes)
     if (p.insurerId && p.stage < 4) {
-      const cfgRow = db.prepare('SELECT onboarding FROM insurers WHERE id=?').get(p.insurerId) as any;
+      const cfgRow = await q.get('SELECT onboarding FROM insurers WHERE id=?', p.insurerId) as any;
       if (cfgRow?.onboarding) {
         try {
           const cfg = JSON.parse(cfgRow.onboarding);
-          const usageAll = (db.prepare('SELECT COALESCE(SUM(billed),0) s FROM bills WHERE patientId=? AND voided=0').get(p.id) as any).s;
+          const usageAll = (await q.get('SELECT COALESCE(SUM(billed),0) s FROM bills WHERE patientId=? AND voided=0', p.id) as any).s;
           const pct = Number(cfg.thresholds?.coveragePct);
           if (pct > 0 && p.uwLimit > 0 && usageAll / p.uwLimit * 100 >= pct)
             alerts.push({ severity: 'high', patientId: p.id, patientName: p.name, text: `Carrier threshold hit: ${Math.round(usageAll / p.uwLimit * 100)}% of coverage used (their flag: ${pct}%) — notify per protocol` });
@@ -976,8 +957,8 @@ api.get('/alerts', (req, res) => {
     if (p.attorneyRetained && p.caseType === 'trilopay' && p.stage < 4)
       alerts.push({ severity: 'high', patientId: p.id, patientName: p.name, text: 'Attorney involved on PIP case — verify where the flow of funds is going' });
     if (p.uwLimit > 0 && p.stage < 4) {
-      const outside = (db.prepare('SELECT COALESCE(SUM(amt),0) s FROM outside_bills WHERE patientId=?').get(p.id) as any).s;
-      const usage = (db.prepare('SELECT COALESCE(SUM(billed),0) s FROM bills WHERE patientId=? AND voided=0').get(p.id) as any).s;
+      const outside = (await q.get('SELECT COALESCE(SUM(amt),0) s FROM outside_bills WHERE patientId=?', p.id) as any).s;
+      const usage = (await q.get('SELECT COALESCE(SUM(billed),0) s FROM bills WHERE patientId=? AND voided=0', p.id) as any).s;
       const remaining = p.uwLimit - outside - usage;
       if (remaining < 0)
         alerts.push({ severity: 'high', patientId: p.id, patientName: p.name, text: `Coverage exceeded by ${fmt$(-remaining)} — stop treatment authorization review needed` });
@@ -988,288 +969,282 @@ api.get('/alerts', (req, res) => {
   res.json(alerts);
 });
 
-api.get('/tasks', (_req, res) => {
-  res.json(db.prepare(`SELECT t.id, t.patientId, p.name as patientName, t.title, t.due, t.created, t.by
-    FROM tasks t JOIN patients p ON p.id=t.patientId ORDER BY t.due IS NULL, t.due`).all());
+api.get('/tasks', async (_req, res) => {
+  res.json(await q.all(`SELECT t.id, t.patientId, p.name as patientName, t.title, t.due, t.created, t.by
+    FROM tasks t JOIN patients p ON p.id=t.patientId ORDER BY t.due IS NULL, t.due`));
 });
 
-api.get('/search', (req, res) => {
-  const q = String(req.query.q || '').toLowerCase();
+api.get('/search', async (req, res) => {
+  const query = String(req.query.q || '').toLowerCase();
   if (!q) return res.json([]);
-  const like = `%${q}%`;
+  const like = `%${query}%`;
   res.json({
-    patients: db.prepare("SELECT id,name,caseType,stage FROM patients WHERE lower(name||id||COALESCE(phone,'')||COALESCE(email,'')) LIKE ? LIMIT 8").all(like),
-    providers: db.prepare("SELECT id,name,type,status FROM providers WHERE lower(name||id||COALESCE(type,'')) LIKE ? LIMIT 8").all(like),
-    insurers: db.prepare('SELECT id,name FROM insurers WHERE lower(name||id) LIKE ? LIMIT 8').all(like),
+    patients: await q.all("SELECT id,name,caseType,stage FROM patients WHERE lower(name||id||COALESCE(phone,'')||COALESCE(email,'')) LIKE ? LIMIT 8", like),
+    providers: await q.all("SELECT id,name,type,status FROM providers WHERE lower(name||id||COALESCE(type,'')) LIKE ? LIMIT 8", like),
+    insurers: await q.all('SELECT id,name FROM insurers WHERE lower(name||id) LIKE ? LIMIT 8', like),
   });
 });
 
 /* ================= patients ================= */
-api.get('/patients/:id', (req, res) => {
-  const p = fullPatient(req.params.id);
+api.get('/patients/:id', async (req, res) => {
+  const p = await fullPatient(req.params.id);
   if (!p) return res.status(404).json({ error: 'Not found' });
   res.json(stripPayout(p, req.user!.role));
 });
 
-api.post('/patients', (req, res) => {
+api.post('/patients', async (req, res) => {
   const v = req.body || {};
   if (!String(v.name || '').trim()) return res.status(400).json({ error: 'Name is required' });
   // Duplicate detection: same name, or same DOB + same last name. Pass force:true to create anyway.
   if (!v.force) {
     const nameL = v.name.trim().toLowerCase();
     const lastWord = nameL.split(/\s+/).pop();
-    const dups = (db.prepare('SELECT id,name,dob,phone FROM patients').all() as any[]).filter(p => {
+    const dups = (await q.all('SELECT id,name,dob,phone FROM patients') as any[]).filter(p => {
       const pn = String(p.name || '').toLowerCase();
       return pn === nameL || (v.dob && p.dob === v.dob && lastWord && pn.includes(lastWord));
     });
     if (dups.length) {
-      audit(req.user!, 'patient.duplicateWarning', 'patient', undefined, v.name);
+      await audit(req.user!, 'patient.duplicateWarning', 'patient', undefined, v.name);
       return res.status(409).json({ error: 'Possible duplicate patient', duplicates: dups });
     }
   }
-  const id = nextId('pt');
+  const id = await nextId('pt');
   let adjusterId: string | null = v.adjusterId || null;
   if (!adjusterId && v.adjusterName && v.insurerId) {
-    const existing = db.prepare('SELECT id FROM adjusters WHERE insurerId=? AND lower(name)=lower(?)').get(v.insurerId, v.adjusterName) as any;
+    const existing = await q.get('SELECT id FROM adjusters WHERE insurerId=? AND lower(name)=lower(?)', v.insurerId, v.adjusterName) as any;
     if (existing) adjusterId = existing.id;
     else {
       adjusterId = 'a' + Date.now();
-      db.prepare('INSERT INTO adjusters(id,insurerId,name) VALUES(?,?,?)').run(adjusterId, v.insurerId, v.adjusterName);
+      await q.run('INSERT INTO adjusters(id,insurerId,name) VALUES(?,?,?)', adjusterId, v.insurerId, v.adjusterName);
     }
   }
-  db.prepare(`INSERT INTO patients(id,name,caseType,phone,email,address,dob,doi,state,insurerId,claimNumber,policyNumber,adjusterId,coordinator,companionId,accident)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, v.name, v.caseType || 'trilopay', v.phone || null, v.email || null, v.address || null,
+  await q.run(`INSERT INTO patients(id,name,caseType,phone,email,address,dob,doi,state,insurerId,claimNumber,policyNumber,adjusterId,coordinator,companionId,accident)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, v.name, v.caseType || 'trilopay', v.phone || null, v.email || null, v.address || null,
       v.dob || null, v.doi || null, v.state || null, v.insurerId || null, v.claimNumber || null,
       v.policyNumber || null, adjusterId, v.coordinator || req.user!.id, v.companionId || null, v.accident || null);
-  if (v.companionId) db.prepare('UPDATE patients SET companionId=? WHERE id=?').run(id, v.companionId);
+  if (v.companionId) await q.run('UPDATE patients SET companionId=? WHERE id=?', id, v.companionId);
   for (const c of ['agentName', 'agentContact', 'agentAuth', 'referralSource'])
-    if (v[c] !== undefined) db.prepare(`UPDATE patients SET ${c}=? WHERE id=?`).run(v[c] || null, id);
-  recordStage(id, 0);
+    if (v[c] !== undefined) await q.run(`UPDATE patients SET ${c}=? WHERE id=?`, v[c] || null, id);
+  await recordStage(id, 0);
   // Coverage auto-populate: assume the state minimum until verified with the carrier.
   if (v.state) {
     const covType = (v.caseType === 'trilogy') ? 'BI' : 'PIP';
-    const sm = db.prepare('SELECT * FROM state_minimums WHERE lower(state)=lower(?) AND coverageType=?').get(v.state.trim(), covType) as any;
+    const sm = await q.get('SELECT * FROM state_minimums WHERE lower(state)=lower(?) AND coverageType=?', v.state.trim(), covType) as any;
     if (sm) {
-      db.prepare("UPDATE patients SET uwLimit=?, uwCoverage=?, uwStatus='Assumed minimum' WHERE id=?")
-        .run(sm.amount, `${covType} — assumed ${v.state} minimum ($${sm.amount.toLocaleString()})`, id);
-      addNote(id, `Coverage auto-populated: assumed ${v.state} ${covType} minimum $${sm.amount.toLocaleString()} — verify with carrier`, req.user!.name);
+      await q.run("UPDATE patients SET uwLimit=?, uwCoverage=?, uwStatus='Assumed minimum' WHERE id=?", sm.amount, `${covType} — assumed ${v.state} minimum ($${sm.amount.toLocaleString()})`, id);
+      await addNote(id, `Coverage auto-populated: assumed ${v.state} ${covType} minimum $${sm.amount.toLocaleString()} — verify with carrier`, req.user!.name);
     }
   }
-  addNote(id, 'Profile created', req.user!.name);
-  audit(req.user!, 'patient.create', 'patient', id, v.name);
-  sendPatient(req, res, id);
+  await addNote(id, 'Profile created', req.user!.name);
+  await audit(req.user!, 'patient.create', 'patient', id, v.name);
+  await sendPatient(req, res, id);
 });
 
-api.patch('/patients/:id', (req, res) => {
+api.patch('/patients/:id', async (req, res) => {
   const id = req.params.id;
-  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(id) as any;
+  const p = await q.get('SELECT * FROM patients WHERE id=?', id) as any;
   if (!p) return res.status(404).json({ error: 'Not found' });
   const v = req.body || {};
   const cols = ['name', 'caseType', 'phone', 'email', 'address', 'dob', 'doi', 'state', 'insurerId', 'claimNumber', 'policyNumber', 'adjusterId', 'accident', 'attorneyRetained', 'attorneyDate', 'attorneyFirm', 'escalated', 'agentName', 'agentContact', 'agentAuth', 'referralSource', 'carrierConfirmed', 'consentSharing', 'carrierAuthorized'];
   if ('carrierConfirmed' in v && Number(v.carrierConfirmed) === 1)
-    addNote(id, '✓ Coverage verified with carrier — case cleared to proceed', req.user!.name);
-  if ('attorneyRetained' in v && Number(v.attorneyRetained) === 1 && !(db.prepare('SELECT attorneyRetained FROM patients WHERE id=?').get(id) as any).attorneyRetained)
-    addNote(id, `ATTORNEY RETAINED${v.attorneyFirm ? ': ' + v.attorneyFirm : ''}${v.attorneyDate ? ' (as of ' + fmtDate(v.attorneyDate) + ')' : ''} — thesis metric recorded`, req.user!.name);
-  for (const c of cols) if (c in v) db.prepare(`UPDATE patients SET ${c}=? WHERE id=?`).run(v[c] === '' ? null : v[c], id);
-  addNote(id, 'Profile details edited', req.user!.name);
-  audit(req.user!, 'patient.update', 'patient', id);
-  sendPatient(req, res, id);
+    await addNote(id, '✓ Coverage verified with carrier — case cleared to proceed', req.user!.name);
+  if ('attorneyRetained' in v && Number(v.attorneyRetained) === 1 && !(await q.get('SELECT attorneyRetained FROM patients WHERE id=?', id) as any).attorneyRetained)
+    await addNote(id, `ATTORNEY RETAINED${v.attorneyFirm ? ': ' + v.attorneyFirm : ''}${v.attorneyDate ? ' (as of ' + fmtDate(v.attorneyDate) + ')' : ''} — thesis metric recorded`, req.user!.name);
+  for (const c of cols) if (c in v) await q.run(`UPDATE patients SET ${c}=? WHERE id=?`, v[c] === '' ? null : v[c], id);
+  await addNote(id, 'Profile details edited', req.user!.name);
+  await audit(req.user!, 'patient.update', 'patient', id);
+  await sendPatient(req, res, id);
 });
 
-api.post('/patients/:id/stage', (req, res) => {
+api.post('/patients/:id/stage', async (req, res) => {
   const STAGES = ['Intake', 'Underwriting', 'Treating', 'Done Treating', 'Paid Out'];
   const id = req.params.id;
-  const p = db.prepare('SELECT stage FROM patients WHERE id=?').get(id) as any;
+  const p = await q.get('SELECT stage FROM patients WHERE id=?', id) as any;
   if (!p) return res.status(404).json({ error: 'Not found' });
   const stage = Number(req.body?.stage);
   if (!(stage >= 0 && stage < STAGES.length)) return res.status(400).json({ error: 'Bad stage' });
-  db.prepare('UPDATE patients SET stage=? WHERE id=?').run(stage, id);
-  recordStage(id, stage);
-  addNote(id, `Status changed: ${STAGES[p.stage]} → ${STAGES[stage]}`, req.user!.name);
-  audit(req.user!, 'patient.stage', 'patient', id, STAGES[stage]);
-  sendPatient(req, res, id);
+  await q.run('UPDATE patients SET stage=? WHERE id=?', stage, id);
+  await recordStage(id, stage);
+  await addNote(id, `Status changed: ${STAGES[p.stage]} → ${STAGES[stage]}`, req.user!.name);
+  await audit(req.user!, 'patient.stage', 'patient', id, STAGES[stage]);
+  await sendPatient(req, res, id);
 });
 
-api.post('/patients/:id/coordinator', (req, res) => {
+api.post('/patients/:id/coordinator', async (req, res) => {
   const id = req.params.id;
-  const u = db.prepare('SELECT name FROM users WHERE id=?').get(req.body?.coordinator) as any;
+  const u = await q.get('SELECT name FROM users WHERE id=?', req.body?.coordinator) as any;
   if (!u) return res.status(400).json({ error: 'Unknown coordinator' });
-  db.prepare('UPDATE patients SET coordinator=? WHERE id=?').run(req.body.coordinator, id);
-  addNote(id, 'Coordinator assigned: ' + u.name, req.user!.name);
-  audit(req.user!, 'patient.coordinator', 'patient', id, u.name);
-  sendPatient(req, res, id);
+  await q.run('UPDATE patients SET coordinator=? WHERE id=?', req.body.coordinator, id);
+  await addNote(id, 'Coordinator assigned: ' + u.name, req.user!.name);
+  await audit(req.user!, 'patient.coordinator', 'patient', id, u.name);
+  await sendPatient(req, res, id);
 });
 
-api.post('/patients/:id/companion', (req, res) => {
+api.post('/patients/:id/companion', async (req, res) => {
   const id = req.params.id;
-  const p = db.prepare('SELECT companionId FROM patients WHERE id=?').get(id) as any;
+  const p = await q.get('SELECT companionId FROM patients WHERE id=?', id) as any;
   if (!p) return res.status(404).json({ error: 'Not found' });
-  if (p.companionId) db.prepare('UPDATE patients SET companionId=NULL WHERE id=?').run(p.companionId);
+  if (p.companionId) await q.run('UPDATE patients SET companionId=NULL WHERE id=?', p.companionId);
   const cid = req.body?.companionId || null;
-  db.prepare('UPDATE patients SET companionId=? WHERE id=?').run(cid, id);
+  await q.run('UPDATE patients SET companionId=? WHERE id=?', cid, id);
   if (cid) {
-    const c = db.prepare('SELECT name FROM patients WHERE id=?').get(cid) as any;
-    db.prepare('UPDATE patients SET companionId=? WHERE id=?').run(id, cid);
-    addNote(id, `Companion claim linked: ${c?.name} (${cid})`, req.user!.name);
-  } else addNote(id, 'Companion claim unlinked', req.user!.name);
-  audit(req.user!, 'patient.companion', 'patient', id, cid ?? 'unlinked');
-  sendPatient(req, res, id);
+    const c = await q.get('SELECT name FROM patients WHERE id=?', cid) as any;
+    await q.run('UPDATE patients SET companionId=? WHERE id=?', id, cid);
+    await addNote(id, `Companion claim linked: ${c?.name} (${cid})`, req.user!.name);
+  } else await addNote(id, 'Companion claim unlinked', req.user!.name);
+  await audit(req.user!, 'patient.companion', 'patient', id, cid ?? 'unlinked');
+  await sendPatient(req, res, id);
 });
 
 /* ---- case messages (staff side of portal threads) ---- */
-api.post('/patients/:id/messages', (req, res) => {
+api.post('/patients/:id/messages', async (req, res) => {
   const text = String(req.body?.text || '').trim();
   if (!text || text.length > 5000) return res.status(400).json({ error: 'Message required (max 5,000 chars)' });
-  db.prepare('INSERT INTO case_messages(patientId,authorName,authorType,text,time) VALUES(?,?,?,?,?)')
-    .run(req.params.id, req.user!.name, 'staff', text, nowMST());
-  audit(req.user!, 'message.send', 'patient', req.params.id);
-  sendPatient(req, res, req.params.id);
+  await q.run('INSERT INTO case_messages(patientId,authorName,authorType,text,time) VALUES(?,?,?,?,?)', req.params.id, req.user!.name, 'staff', text, nowMST());
+  await audit(req.user!, 'message.send', 'patient', req.params.id);
+  await sendPatient(req, res, req.params.id);
 });
 
 /* ---- notes ---- */
-api.post('/patients/:id/notes', (req, res) => {
+api.post('/patients/:id/notes', async (req, res) => {
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Empty note' });
   if (text.length > 10000) return res.status(400).json({ error: 'Note too long (10,000 character max)' });
-  addNote(req.params.id, text, req.user!.name, false);
-  db.prepare('UPDATE notes SET sys=0 WHERE id=(SELECT MAX(id) FROM notes WHERE patientId=?)').run(req.params.id);
-  audit(req.user!, 'note.add', 'patient', req.params.id);
-  sendPatient(req, res, req.params.id);
+  await addNote(req.params.id, text, req.user!.name, false);
+  await q.run('UPDATE notes SET sys=0 WHERE id=(SELECT MAX(id) FROM notes WHERE patientId=?)', req.params.id);
+  await audit(req.user!, 'note.add', 'patient', req.params.id);
+  await sendPatient(req, res, req.params.id);
 });
 
 /* ---- tasks ---- */
-api.post('/patients/:id/tasks', (req, res) => {
+api.post('/patients/:id/tasks', async (req, res) => {
   const title = String(req.body?.title || '').trim();
   if (!title) return res.status(400).json({ error: 'Title required' });
   const tid = 't' + Date.now() + Math.floor(Math.random() * 1000);
-  db.prepare('INSERT INTO tasks(id,patientId,title,due,created,by) VALUES(?,?,?,?,?,?)')
-    .run(tid, req.params.id, title, req.body?.due || null, nowMST(), req.user!.name);
-  addNote(req.params.id, `Task created: "${title}"` + (req.body?.due ? ` (due ${fmtDate(req.body.due)})` : ''), req.user!.name);
-  audit(req.user!, 'task.create', 'task', tid, title);
-  sendPatient(req, res, req.params.id);
+  await q.run('INSERT INTO tasks(id,patientId,title,due,created,by) VALUES(?,?,?,?,?,?)', tid, req.params.id, title, req.body?.due || null, nowMST(), req.user!.name);
+  await addNote(req.params.id, `Task created: "${title}"` + (req.body?.due ? ` (due ${fmtDate(req.body.due)})` : ''), req.user!.name);
+  await audit(req.user!, 'task.create', 'task', tid, title);
+  await sendPatient(req, res, req.params.id);
 });
 
-api.post('/tasks/:tid/snooze', (req, res) => {
-  const t = db.prepare('SELECT * FROM tasks WHERE id=?').get(req.params.tid) as any;
+api.post('/tasks/:tid/snooze', async (req, res) => {
+  const t = await q.get('SELECT * FROM tasks WHERE id=?', req.params.tid) as any;
   if (!t) return res.status(404).json({ error: 'Not found' });
   const due = String(req.body?.due || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(due)) return res.status(400).json({ error: 'Pick a date' });
-  db.prepare('UPDATE tasks SET due=? WHERE id=?').run(due, t.id);
-  addNote(t.patientId, `Task pushed out: "${t.title}" — ${fmtDate(t.due)} → ${fmtDate(due)}`, req.user!.name);
-  audit(req.user!, 'task.snooze', 'task', t.id, due);
-  sendPatient(req, res, t.patientId);
+  await q.run('UPDATE tasks SET due=? WHERE id=?', due, t.id);
+  await addNote(t.patientId, `Task pushed out: "${t.title}" — ${fmtDate(t.due)} → ${fmtDate(due)}`, req.user!.name);
+  await audit(req.user!, 'task.snooze', 'task', t.id, due);
+  await sendPatient(req, res, t.patientId);
 });
 
-api.post('/tasks/:tid/complete', (req, res) => {
-  const t = db.prepare('SELECT * FROM tasks WHERE id=?').get(req.params.tid) as any;
+api.post('/tasks/:tid/complete', async (req, res) => {
+  const t = await q.get('SELECT * FROM tasks WHERE id=?', req.params.tid) as any;
   if (!t) return res.status(404).json({ error: 'Not found' });
-  db.prepare('DELETE FROM tasks WHERE id=?').run(t.id);
-  addNote(t.patientId, `Task completed: "${t.title}"`, req.user!.name);
-  audit(req.user!, 'task.complete', 'task', t.id, t.title);
-  sendPatient(req, res, t.patientId);
+  await q.run('DELETE FROM tasks WHERE id=?', t.id);
+  await addNote(t.patientId, `Task completed: "${t.title}"`, req.user!.name);
+  await audit(req.user!, 'task.complete', 'task', t.id, t.title);
+  await sendPatient(req, res, t.patientId);
 });
 
-api.post('/tasks/:tid/comments', (req, res) => {
-  const t = db.prepare('SELECT * FROM tasks WHERE id=?').get(req.params.tid) as any;
+api.post('/tasks/:tid/comments', async (req, res) => {
+  const t = await q.get('SELECT * FROM tasks WHERE id=?', req.params.tid) as any;
   if (!t) return res.status(404).json({ error: 'Not found' });
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Empty comment' });
-  db.prepare('INSERT INTO task_comments(taskId,text,by,time) VALUES(?,?,?,?)').run(t.id, text, req.user!.name, nowMST());
-  audit(req.user!, 'task.comment', 'task', t.id);
-  sendPatient(req, res, t.patientId);
+  await q.run('INSERT INTO task_comments(taskId,text,by,time) VALUES(?,?,?,?)', t.id, text, req.user!.name, nowMST());
+  await audit(req.user!, 'task.comment', 'task', t.id);
+  await sendPatient(req, res, t.patientId);
 });
 
 /* ---- underwriting ---- */
-api.patch('/patients/:id/uw', (req, res) => {
+api.patch('/patients/:id/uw', async (req, res) => {
   const v = req.body || {};
-  db.prepare('UPDATE patients SET uwStatus=?,uwCoverage=?,uwLimit=?,uwRiskFlags=?,uwApprovedBy=? WHERE id=?')
-    .run(v.status ?? 'Not started', v.coverage ?? null, Number(v.limit) || 0, v.riskFlags ?? null, v.approvedBy ?? null, req.params.id);
+  await q.run('UPDATE patients SET uwStatus=?,uwCoverage=?,uwLimit=?,uwRiskFlags=?,uwApprovedBy=? WHERE id=?', v.status ?? 'Not started', v.coverage ?? null, Number(v.limit) || 0, v.riskFlags ?? null, v.approvedBy ?? null, req.params.id);
   // Carrier authorization for the case — the operative number the case works off.
   if ('carrierAuthorized' in v) {
     const amt = Number(v.carrierAuthorized) || 0;
-    const prev = (db.prepare('SELECT carrierAuthorized FROM patients WHERE id=?').get(req.params.id) as any)?.carrierAuthorized || 0;
-    db.prepare('UPDATE patients SET carrierAuthorized=? WHERE id=?').run(amt, req.params.id);
-    if (amt !== prev) addNote(req.params.id, `Carrier authorization for this case set to ${fmt$(amt)}${prev ? ` (was ${fmt$(prev)})` : ''} — case now works off this number`, req.user!.name);
+    const prev = (await q.get('SELECT carrierAuthorized FROM patients WHERE id=?', req.params.id) as any)?.carrierAuthorized || 0;
+    await q.run('UPDATE patients SET carrierAuthorized=? WHERE id=?', amt, req.params.id);
+    if (amt !== prev) await addNote(req.params.id, `Carrier authorization for this case set to ${fmt$(amt)}${prev ? ` (was ${fmt$(prev)})` : ''} — case now works off this number`, req.user!.name);
   }
-  addNote(req.params.id, `Underwriting updated (${v.status})`, req.user!.name);
-  audit(req.user!, 'uw.update', 'patient', req.params.id);
-  sendPatient(req, res, req.params.id);
+  await addNote(req.params.id, `Underwriting updated (${v.status})`, req.user!.name);
+  await audit(req.user!, 'uw.update', 'patient', req.params.id);
+  await sendPatient(req, res, req.params.id);
 });
 
-api.post('/patients/:id/outside-bills', (req, res) => {
+api.post('/patients/:id/outside-bills', async (req, res) => {
   const descr = String(req.body?.desc || '').trim();
   const amt = Number(req.body?.amt);
   if (!descr || !(amt > 0)) return res.status(400).json({ error: 'A note and a positive amount are required' });
-  db.prepare('INSERT INTO outside_bills(patientId,descr,amt) VALUES(?,?,?)').run(req.params.id, descr, amt);
-  addNote(req.params.id, `Outside medical bill added: ${descr} ${fmt$(amt)} — coverage remaining recalculated`, req.user!.name);
-  audit(req.user!, 'uw.outsideBill.add', 'patient', req.params.id, `${descr} ${amt}`);
-  sendPatient(req, res, req.params.id);
+  await q.run('INSERT INTO outside_bills(patientId,descr,amt) VALUES(?,?,?)', req.params.id, descr, amt);
+  await addNote(req.params.id, `Outside medical bill added: ${descr} ${fmt$(amt)} — coverage remaining recalculated`, req.user!.name);
+  await audit(req.user!, 'uw.outsideBill.add', 'patient', req.params.id, `${descr} ${amt}`);
+  await sendPatient(req, res, req.params.id);
 });
 
-api.delete('/outside-bills/:obid', (req, res) => {
-  const ob = db.prepare('SELECT * FROM outside_bills WHERE id=?').get(req.params.obid) as any;
+api.delete('/outside-bills/:obid', async (req, res) => {
+  const ob = await q.get('SELECT * FROM outside_bills WHERE id=?', req.params.obid) as any;
   if (!ob) return res.status(404).json({ error: 'Not found' });
-  db.prepare('DELETE FROM outside_bills WHERE id=?').run(ob.id);
-  addNote(ob.patientId, `Outside medical bill removed: ${ob.descr} ${fmt$(ob.amt)}`, req.user!.name);
-  audit(req.user!, 'uw.outsideBill.remove', 'patient', ob.patientId);
-  sendPatient(req, res, ob.patientId);
+  await q.run('DELETE FROM outside_bills WHERE id=?', ob.id);
+  await addNote(ob.patientId, `Outside medical bill removed: ${ob.descr} ${fmt$(ob.amt)}`, req.user!.name);
+  await audit(req.user!, 'uw.outsideBill.remove', 'patient', ob.patientId);
+  await sendPatient(req, res, ob.patientId);
 });
 
 /* ---- provider links & authorizations ---- */
-api.post('/patients/:id/provlinks', (req, res) => {
+api.post('/patients/:id/provlinks', async (req, res) => {
   const { providerId, branch } = req.body || {};
-  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(providerId) as any;
+  const pr = await q.get('SELECT name FROM providers WHERE id=?', providerId) as any;
   if (!pr) return res.status(400).json({ error: 'Unknown provider' });
   try {
-    db.prepare('INSERT INTO prov_links(patientId,providerId,branch) VALUES(?,?,?)').run(req.params.id, providerId, branch || null);
+    await q.run('INSERT INTO prov_links(patientId,providerId,branch) VALUES(?,?,?)', req.params.id, providerId, branch || null);
   } catch { return res.status(400).json({ error: 'Provider already linked' }); }
-  addNote(req.params.id, `Provider linked: ${pr.name}${branch ? ` (${branch})` : ''} — status: Pending`, req.user!.name);
-  audit(req.user!, 'provlink.create', 'patient', req.params.id, providerId);
-  sendPatient(req, res, req.params.id);
+  await addNote(req.params.id, `Provider linked: ${pr.name}${branch ? ` (${branch})` : ''} — status: Pending`, req.user!.name);
+  await audit(req.user!, 'provlink.create', 'patient', req.params.id, providerId);
+  await sendPatient(req, res, req.params.id);
 });
 
 api.post('/provlinks/:lid/action', async (req, res) => {
-  const l = db.prepare('SELECT * FROM prov_links WHERE id=?').get(req.params.lid) as any;
+  const l = await q.get('SELECT * FROM prov_links WHERE id=?', req.params.lid) as any;
   if (!l) return res.status(404).json({ error: 'Not found' });
-  const pr = db.prepare('SELECT name, corpEmail FROM providers WHERE id=?').get(l.providerId) as any;
+  const pr = await q.get('SELECT name, corpEmail FROM providers WHERE id=?', l.providerId) as any;
   const kind = String(req.body?.kind);
   const amount = Number(req.body?.amount) || 0;
   // Each send creates the actual document (printable at the returned URL) and a
   // prewritten email draft (mailto) — the client opens both. Attachment rides
   // automatically once the email integration lands.
   let sentId: number | null = null;
-  const sd = (name: string) => {
-    const info = db.prepare('INSERT INTO sent_docs(patientId,name,toStr,time,status,method,meta) VALUES(?,?,?,?,?,?,?)')
-      .run(l.patientId, name, pr.name, nowMST(), 'Sent', 'Email',
+  const sd = async (name: string) => {
+    const info = await q.run('INSERT INTO sent_docs(patientId,name,toStr,time,status,method,meta) VALUES(?,?,?,?,?,?,?)', l.patientId, name, pr.name, nowMST(), 'Sent', 'Email',
         JSON.stringify({ kind, amount: amount || null, providerId: l.providerId, branch: l.branch || null }));
     sentId = Number(info.lastInsertRowid);
   };
 
   if (kind === 'auth' || kind === 'addauth') {
     if (!(amount > 0)) return res.status(400).json({ error: 'Authorization amount must be positive' });
-    db.prepare('UPDATE prov_links SET authAmount=authAmount+?, authCount=authCount+1, status=? WHERE id=?').run(amount, 'authorized', l.id);
-    addNote(l.patientId, `${kind === 'auth' ? 'Authorization' : 'Additional authorization'} sent to ${pr.name}: ${fmt$(amount)} (total ${fmt$(l.authAmount + amount)}) — status: Authorized`, req.user!.name);
+    await q.run('UPDATE prov_links SET authAmount=authAmount+?, authCount=authCount+1, status=? WHERE id=?', amount, 'authorized', l.id);
+    await addNote(l.patientId, `${kind === 'auth' ? 'Authorization' : 'Additional authorization'} sent to ${pr.name}: ${fmt$(amount)} (total ${fmt$(l.authAmount + amount)}) — status: Authorized`, req.user!.name);
     sd(kind === 'auth' ? 'Authorization' : "Add'l Authorization");
   } else if (kind === 'reqform') {
-    addNote(l.patientId, `Add'l auth request form sent to ${pr.name} (for provider to fill & return)`, req.user!.name);
+    await addNote(l.patientId, `Add'l auth request form sent to ${pr.name} (for provider to fill & return)`, req.user!.name);
     sd("Add'l Authorization Request Form");
   } else if (kind === 'cxl') {
     if (l.status === 'finalized') return res.status(400).json({ error: 'Already finalized' });
-    db.prepare("UPDATE prov_links SET status='canceled' WHERE id=?").run(l.id);
-    addNote(l.patientId, `Cancel-authorization form sent to ${pr.name} (verifies all transactions; awaiting signature) — status: Canceled`, req.user!.name);
+    await q.run("UPDATE prov_links SET status='canceled' WHERE id=?", l.id);
+    await addNote(l.patientId, `Cancel-authorization form sent to ${pr.name} (verifies all transactions; awaiting signature) — status: Canceled`, req.user!.name);
     sd('Cancellation of Authorization Form');
   } else if (kind === 'cxlback') {
     if (l.status !== 'canceled') return res.status(400).json({ error: 'Send the cancel form first' });
-    db.prepare("UPDATE prov_links SET status='finalized' WHERE id=?").run(l.id);
-    addNote(l.patientId, `Signed cancel-auth form received from ${pr.name} — status: Finalized`, req.user!.name);
+    await q.run("UPDATE prov_links SET status='finalized' WHERE id=?", l.id);
+    await addNote(l.patientId, `Signed cancel-auth form received from ${pr.name} — status: Finalized`, req.user!.name);
   } else return res.status(400).json({ error: 'Unknown action' });
 
-  audit(req.user!, 'provlink.' + kind, 'patient', l.patientId, pr.name);
-  const pt = db.prepare('SELECT name FROM patients WHERE id=?').get(l.patientId) as any;
+  await audit(req.user!, 'provlink.' + kind, 'patient', l.patientId, pr.name);
+  const pt = await q.get('SELECT name FROM patients WHERE id=?', l.patientId) as any;
   const docName = kind === 'auth' ? 'Authorization' : kind === 'addauth' ? "Add'l Authorization" : kind === 'reqform' ? "Add'l Authorization Request Form" : 'Cancellation of Authorization Form';
   const emailed = sentId ? await emailSentDoc(l.patientId, sentId, pr.corpEmail || null, (req.user as any)?.email || null) : false;
-  sendPatient(req, res, l.patientId, sentId ? {
+  await sendPatient(req, res, l.patientId, sentId ? {
     _emailed: emailed,
     _doc: {
       url: `/api/patients/${l.patientId}/sentdoc/${sentId}/print`,
@@ -1281,16 +1256,16 @@ api.post('/provlinks/:lid/action', async (req, res) => {
 });
 
 /* Edit the authorized total after the fact (audited; the four-check recalculates). */
-api.patch('/provlinks/:lid', (req, res) => {
-  const l = db.prepare('SELECT * FROM prov_links WHERE id=?').get(req.params.lid) as any;
+api.patch('/provlinks/:lid', async (req, res) => {
+  const l = await q.get('SELECT * FROM prov_links WHERE id=?', req.params.lid) as any;
   if (!l) return res.status(404).json({ error: 'Not found' });
   const authAmount = Number(req.body?.authAmount);
   if (!(authAmount >= 0)) return res.status(400).json({ error: 'Authorization total must be zero or more' });
-  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(l.providerId) as any;
-  db.prepare('UPDATE prov_links SET authAmount=? WHERE id=?').run(authAmount, l.id);
-  addNote(l.patientId, `Authorization total for ${pr?.name} corrected: ${fmt$(l.authAmount)} → ${fmt$(authAmount)}`, req.user!.name);
-  audit(req.user!, 'provlink.authEdit', 'patient', l.patientId, `${pr?.name}: ${l.authAmount} → ${authAmount}`);
-  sendPatient(req, res, l.patientId);
+  const pr = await q.get('SELECT name FROM providers WHERE id=?', l.providerId) as any;
+  await q.run('UPDATE prov_links SET authAmount=? WHERE id=?', authAmount, l.id);
+  await addNote(l.patientId, `Authorization total for ${pr?.name} corrected: ${fmt$(l.authAmount)} → ${fmt$(authAmount)}`, req.user!.name);
+  await audit(req.user!, 'provlink.authEdit', 'patient', l.patientId, `${pr?.name}: ${l.authAmount} → ${authAmount}`);
+  await sendPatient(req, res, l.patientId);
 });
 
 /* One renderer for sent docs: the print view AND the email body are the same document. */
@@ -1327,9 +1302,9 @@ ${row('Case type', p.caseType === 'trilogy' ? 'Third-party bodily injury' : 'PIP
 </body></html>`;
 }
 
-api.get('/patients/:id/sentdoc/:sid/print', (req, res) => {
-  const d = db.prepare('SELECT * FROM sent_docs WHERE id=? AND patientId=?').get(req.params.sid, req.params.id) as any;
-  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(req.params.id) as any;
+api.get('/patients/:id/sentdoc/:sid/print', async (req, res) => {
+  const d = await q.get('SELECT * FROM sent_docs WHERE id=? AND patientId=?', req.params.sid, req.params.id) as any;
+  const p = await q.get('SELECT * FROM patients WHERE id=?', req.params.id) as any;
   if (!d || !p) return res.status(404).json({ error: 'Not found' });
   res.send(renderSentDocHtml(p, d));
 });
@@ -1337,9 +1312,9 @@ api.get('/patients/:id/sentdoc/:sid/print', (req, res) => {
 /** When email is live, a sent doc really goes out — document in the body and attached.
     replyTo = the coordinator who sent it, so the provider's reply lands with them. */
 async function emailSentDoc(patientId: string, sid: number, toEmail: string | null, replyTo?: string | null): Promise<boolean> {
-  if (!toEmail || !emailReady()) return false;
-  const d = db.prepare('SELECT * FROM sent_docs WHERE id=?').get(sid) as any;
-  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(patientId) as any;
+  if (!toEmail || !await emailReady()) return false;
+  const d = await q.get('SELECT * FROM sent_docs WHERE id=?', sid) as any;
+  const p = await q.get('SELECT * FROM patients WHERE id=?', patientId) as any;
   if (!d || !p) return false;
   const html = renderSentDocHtml(p, d);
   const r = await sendMail({
@@ -1348,131 +1323,128 @@ async function emailSentDoc(patientId: string, sid: number, toEmail: string | nu
     patientId, meta: { kind: 'sentdoc', sid }, replyTo: replyTo || null,
   });
   if (r.sent) {
-    db.prepare("UPDATE sent_docs SET method='Email (sent by Arc)' WHERE id=?").run(sid);
-    addNote(patientId, `Emailed "${d.name}" to ${toEmail} — document included and attached`, 'system');
+    await q.run("UPDATE sent_docs SET method='Email (sent by Arc)' WHERE id=?", sid);
+    await addNote(patientId, `Emailed "${d.name}" to ${toEmail} — document included and attached`, 'system');
   }
   return r.sent;
 }
 
 /* ---- bills / receipts / payments ---- */
-api.post('/patients/:id/bills', (req, res) => {
+api.post('/patients/:id/bills', async (req, res) => {
   const v = req.body || {};
-  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(v.providerId) as any;
+  const pr = await q.get('SELECT name FROM providers WHERE id=?', v.providerId) as any;
   if (!pr) return res.status(400).json({ error: 'Unknown provider' });
   const lineItems: any[] = Array.isArray(v.items) ? v.items.filter((x: any) => x.cpt || Number(x.charge)) : [];
   const billedIn = Number(v.billed) || lineItems.reduce((s, x) => s + (Number(x.charge) || 0) * (Number(x.units) || 1), 0);
   v.billed = billedIn;
   if (!(billedIn > 0)) return res.status(400).json({ error: 'Billed amount (or CPT line items) required' });
   if (Number(v.rate) < 0) return res.status(400).json({ error: 'Payout cannot be negative' });
-  const link = db.prepare('SELECT * FROM prov_links WHERE patientId=? AND providerId=?').get(req.params.id, v.providerId) as any;
+  const link = await q.get('SELECT * FROM prov_links WHERE patientId=? AND providerId=?', req.params.id, v.providerId) as any;
   if (!link) return res.status(400).json({ error: 'Link this provider to the patient first (Medical Providers tab)' });
 
   // Contracted-rate engine: revenue from carrier CPT prices, payout from provider CPT rates or branch % (w/ timely-filing tier).
-  const pRow = db.prepare('SELECT insurerId FROM patients WHERE id=?').get(req.params.id) as any;
-  const eco = computeBillEconomics(pRow?.insurerId || null, v.providerId, link.branch, lineItems, billedIn, v.dos || null);
+  const pRow = await q.get('SELECT insurerId FROM patients WHERE id=?', req.params.id) as any;
+  const eco = await computeBillEconomics(pRow?.insurerId || null, v.providerId, link.branch, lineItems, billedIn, v.dos || null);
   let rate = Number(v.rate) || eco.payout || 0;
   // Note text stays payout-free — financial detail lives in the admin Financials tab.
   let rateNote = eco.revenueMissing.length ? ` — no carrier rate on file for CPT ${eco.revenueMissing.join(', ')}` : '';
   const bid = 'b' + Date.now() + Math.floor(Math.random() * 1000);
-  db.prepare('INSERT INTO bills(id,patientId,providerId,dos,billed,rate,revenue) VALUES(?,?,?,?,?,?,?)')
-    .run(bid, req.params.id, v.providerId, v.dos || null, Number(v.billed), rate, eco.revenue);
+  await q.run('INSERT INTO bills(id,patientId,providerId,dos,billed,rate,revenue) VALUES(?,?,?,?,?,?,?)', bid, req.params.id, v.providerId, v.dos || null, Number(v.billed), rate, eco.revenue);
   for (const x of lineItems)
-    db.prepare('INSERT INTO bill_items(billId,cpt,icd,units,charge,modifier) VALUES(?,?,?,?,?,?)')
-      .run(bid, x.cpt || null, x.icd || null, Number(x.units) || 1, Number(x.charge) || 0, x.modifier || null);
-  db.prepare('UPDATE prov_links SET billed=billed+? WHERE patientId=? AND providerId=?').run(Number(v.billed), req.params.id, v.providerId);
-  addNote(req.params.id, `Bill added: ${pr.name} · DOS ${fmtDate(v.dos)} · ${fmt$(Number(v.billed))}${rateNote} — attach the bill + visit note files to unlock payment`, req.user!.name);
-  audit(req.user!, 'bill.create', 'bill', bid);
-  sendPatient(req, res, req.params.id);
+    await q.run('INSERT INTO bill_items(billId,cpt,icd,units,charge,modifier) VALUES(?,?,?,?,?,?)', bid, x.cpt || null, x.icd || null, Number(x.units) || 1, Number(x.charge) || 0, x.modifier || null);
+  await q.run('UPDATE prov_links SET billed=billed+? WHERE patientId=? AND providerId=?', Number(v.billed), req.params.id, v.providerId);
+  await addNote(req.params.id, `Bill added: ${pr.name} · DOS ${fmtDate(v.dos)} · ${fmt$(Number(v.billed))}${rateNote} — attach the bill + visit note files to unlock payment`, req.user!.name);
+  await audit(req.user!, 'bill.create', 'bill', bid);
+  await sendPatient(req, res, req.params.id);
 });
 
 /* Set/correct the payout on an unpaid bill — admin only (payout is auto-calculated;
    corrections are the exception, and payout figures never reach non-admin staff). */
-api.patch('/bills/:bid', requireAdmin, (req, res) => {
-  const b = db.prepare('SELECT * FROM bills WHERE id=?').get(req.params.bid) as any;
+api.patch('/bills/:bid', requireAdmin, async (req, res) => {
+  const b = await q.get('SELECT * FROM bills WHERE id=?', req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   if (b.status === 'paid') return res.status(400).json({ error: 'Bill already paid — void it and re-enter instead' });
   if (b.voided) return res.status(400).json({ error: 'Bill is voided' });
   const rate = Number(req.body?.rate);
   if (!(rate >= 0)) return res.status(400).json({ error: 'Payout must be zero or more' });
-  db.prepare('UPDATE bills SET rate=? WHERE id=?').run(rate, b.id);
-  addNote(b.patientId, `Payout terms corrected on the DOS ${fmtDate(b.dos)} bill (admin adjustment — details in Financials)`, req.user!.name);
-  audit(req.user!, 'bill.rateChange', 'bill', b.id, `${b.rate} → ${rate}`);
-  sendPatient(req, res, b.patientId);
+  await q.run('UPDATE bills SET rate=? WHERE id=?', rate, b.id);
+  await addNote(b.patientId, `Payout terms corrected on the DOS ${fmtDate(b.dos)} bill (admin adjustment — details in Financials)`, req.user!.name);
+  await audit(req.user!, 'bill.rateChange', 'bill', b.id, `${b.rate} → ${rate}`);
+  await sendPatient(req, res, b.patientId);
 });
 
 /* Void a bill (correction flow — never deletes, always audited). */
-api.post('/bills/:bid/void', (req, res) => {
-  const b = db.prepare('SELECT * FROM bills WHERE id=?').get(req.params.bid) as any;
+api.post('/bills/:bid/void', async (req, res) => {
+  const b = await q.get('SELECT * FROM bills WHERE id=?', req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   if (b.voided) return res.status(400).json({ error: 'Already voided' });
   const reason = String(req.body?.reason || '').trim();
   if (!reason) return res.status(400).json({ error: 'A reason is required to void' });
-  db.prepare('UPDATE bills SET voided=1, voidReason=? WHERE id=?').run(reason, b.id);
-  db.prepare('UPDATE prov_links SET billed=MAX(0,billed-?) WHERE patientId=? AND providerId=?').run(b.billed, b.patientId, b.providerId);
-  db.prepare('DELETE FROM receipt_bills WHERE billId=?').run(b.id);
-  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(b.providerId) as any;
-  addNote(b.patientId, `Bill VOIDED: ${pr?.name} · DOS ${fmtDate(b.dos)} · ${fmt$(b.billed)} — reason: ${reason}` +
+  await q.run('UPDATE bills SET voided=1, voidReason=? WHERE id=?', reason, b.id);
+  await q.run('UPDATE prov_links SET billed=MAX(0,billed-?) WHERE patientId=? AND providerId=?', b.billed, b.patientId, b.providerId);
+  await q.run('DELETE FROM receipt_bills WHERE billId=?', b.id);
+  const pr = await q.get('SELECT name FROM providers WHERE id=?', b.providerId) as any;
+  await addNote(b.patientId, `Bill VOIDED: ${pr?.name} · DOS ${fmtDate(b.dos)} · ${fmt$(b.billed)} — reason: ${reason}` +
     (b.status === 'paid' ? ` this bill was already PAID ${fmt$(b.rate)} — recover the payment separately` : ''), req.user!.name);
-  audit(req.user!, 'bill.void', 'bill', b.id, reason);
-  sendPatient(req, res, b.patientId);
+  await audit(req.user!, 'bill.void', 'bill', b.id, reason);
+  await sendPatient(req, res, b.patientId);
 });
 
 /* Void a receipt. */
-api.post('/receipts/:rid/void', (req, res) => {
-  const r = db.prepare('SELECT * FROM receipts WHERE id=?').get(req.params.rid) as any;
+api.post('/receipts/:rid/void', async (req, res) => {
+  const r = await q.get('SELECT * FROM receipts WHERE id=?', req.params.rid) as any;
   if (!r) return res.status(404).json({ error: 'Not found' });
   if (r.voided) return res.status(400).json({ error: 'Already voided' });
   const reason = String(req.body?.reason || '').trim();
   if (!reason) return res.status(400).json({ error: 'A reason is required to void' });
-  db.prepare('UPDATE receipts SET voided=1, voidReason=? WHERE id=?').run(reason, r.id);
-  db.prepare('DELETE FROM receipt_bills WHERE receiptId=?').run(r.id);
-  addNote(r.patientId, `Receipt VOIDED: ${fmt$(r.amount)} (${r.ref || ''}) — reason: ${reason}`, req.user!.name);
-  audit(req.user!, 'receipt.void', 'receipt', String(r.id), reason);
-  sendPatient(req, res, r.patientId);
+  await q.run('UPDATE receipts SET voided=1, voidReason=? WHERE id=?', reason, r.id);
+  await q.run('DELETE FROM receipt_bills WHERE receiptId=?', r.id);
+  await addNote(r.patientId, `Receipt VOIDED: ${fmt$(r.amount)} (${r.ref || ''}) — reason: ${reason}`, req.user!.name);
+  await audit(req.user!, 'receipt.void', 'receipt', String(r.id), reason);
+  await sendPatient(req, res, r.patientId);
 });
 
 /* Reconciliation: link a receipt to the bills it covers. */
-api.post('/receipts/:rid/link', (req, res) => {
-  const r = db.prepare('SELECT * FROM receipts WHERE id=?').get(req.params.rid) as any;
+api.post('/receipts/:rid/link', async (req, res) => {
+  const r = await q.get('SELECT * FROM receipts WHERE id=?', req.params.rid) as any;
   if (!r) return res.status(404).json({ error: 'Not found' });
   if (r.voided) return res.status(400).json({ error: 'Receipt is voided' });
   const billIds: string[] = Array.isArray(req.body?.billIds) ? req.body.billIds : [];
   for (const bid of billIds) {
-    const b = db.prepare('SELECT patientId FROM bills WHERE id=?').get(bid) as any;
+    const b = await q.get('SELECT patientId FROM bills WHERE id=?', bid) as any;
     if (!b || b.patientId !== r.patientId) return res.status(400).json({ error: 'Bill ' + bid + ' does not belong to this patient' });
   }
-  const tx = db.transaction(() => {
-    db.prepare('DELETE FROM receipt_bills WHERE receiptId=?').run(r.id);
-    for (const bid of billIds) db.prepare('INSERT INTO receipt_bills(receiptId,billId) VALUES(?,?)').run(r.id, bid);
+  await tx(async () => {
+    await q.run('DELETE FROM receipt_bills WHERE receiptId=?', r.id);
+    for (const bid of billIds) await q.run('INSERT INTO receipt_bills(receiptId,billId) VALUES(?,?)', r.id, bid);
   });
-  tx();
-  addNote(r.patientId, `Receipt ${fmt$(r.amount)} (${r.ref || ''}) reconciled to ${billIds.length} bill${billIds.length === 1 ? '' : 's'}`, req.user!.name);
-  audit(req.user!, 'receipt.link', 'receipt', String(r.id), billIds.join(','));
-  sendPatient(req, res, r.patientId);
+  
+  await addNote(r.patientId, `Receipt ${fmt$(r.amount)} (${r.ref || ''}) reconciled to ${billIds.length} bill${billIds.length === 1 ? '' : 's'}`, req.user!.name);
+  await audit(req.user!, 'receipt.link', 'receipt', String(r.id), billIds.join(','));
+  await sendPatient(req, res, r.patientId);
 });
 
-api.post('/bills/:bid/attach/:field', upload.single('file'), persistUploads, (req, res) => {
-  const b = db.prepare('SELECT * FROM bills WHERE id=?').get(req.params.bid) as any;
+api.post('/bills/:bid/attach/:field', upload.single('file'), persistUploads, async (req, res) => {
+  const b = await q.get('SELECT * FROM bills WHERE id=?', req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   if (b.voided) return res.status(400).json({ error: 'Bill is voided' });
   const field = req.params.field === 'bill' ? 'bill' : 'note';
   if (!req.file) return res.status(400).json({ error: 'No file' });
   const fid = req.file.filename;
-  db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
-    .run(fid, req.file.originalname, req.file.mimetype, req.file.size, req.user!.name, nowMST());
-  if (field === 'bill') db.prepare('UPDATE bills SET hasBill=1,billFileId=?,billFileName=? WHERE id=?').run(fid, req.file.originalname, b.id);
-  else db.prepare('UPDATE bills SET hasNote=1,noteFileId=?,noteFileName=? WHERE id=?').run(fid, req.file.originalname, b.id);
-  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(b.providerId) as any;
-  addNote(b.patientId, `${field === 'bill' ? 'Bill file' : 'Visit note file'} attached: "${req.file.originalname}" for DOS ${fmtDate(b.dos)} (${pr?.name || ''})`, req.user!.name);
-  audit(req.user!, 'bill.attach.' + field, 'bill', b.id, req.file.originalname);
-  sendPatient(req, res, b.patientId);
+  await q.run('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)', fid, req.file.originalname, req.file.mimetype, req.file.size, req.user!.name, nowMST());
+  if (field === 'bill') await q.run('UPDATE bills SET hasBill=1,billFileId=?,billFileName=? WHERE id=?', fid, req.file.originalname, b.id);
+  else await q.run('UPDATE bills SET hasNote=1,noteFileId=?,noteFileName=? WHERE id=?', fid, req.file.originalname, b.id);
+  const pr = await q.get('SELECT name FROM providers WHERE id=?', b.providerId) as any;
+  await addNote(b.patientId, `${field === 'bill' ? 'Bill file' : 'Visit note file'} attached: "${req.file.originalname}" for DOS ${fmtDate(b.dos)} (${pr?.name || ''})`, req.user!.name);
+  await audit(req.user!, 'bill.attach.' + field, 'bill', b.id, req.file.originalname);
+  await sendPatient(req, res, b.patientId);
 });
 
 /* Uploaded files render inline only for types that can't carry scripts —
    anything else (HTML, SVG, unknown) downloads instead of executing on our origin. */
 export const SAFE_INLINE_MIME = /^(application\/pdf|image\/(png|jpe?g|gif|webp)|text\/plain)$/i;
 api.get('/files/:fid', async (req, res) => {
-  const f = db.prepare('SELECT * FROM files WHERE id=?').get(req.params.fid) as any;
+  const f = await q.get('SELECT * FROM files WHERE id=?', req.params.fid) as any;
   if (!f) return res.status(404).json({ error: 'Not found' });
   const stream = await openStored(f.id);
   if (!stream) return res.status(404).json({ error: 'File missing from storage' });
@@ -1482,55 +1454,53 @@ api.get('/files/:fid', async (req, res) => {
   stream.pipe(res);
 });
 
-api.post('/bills/:bid/pay', (req, res) => {
-  const b = db.prepare('SELECT * FROM bills WHERE id=?').get(req.params.bid) as any;
+api.post('/bills/:bid/pay', async (req, res) => {
+  const b = await q.get('SELECT * FROM bills WHERE id=?', req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   if (b.voided) return res.status(400).json({ error: 'Bill is voided' });
   if (b.status === 'paid') return res.status(400).json({ error: 'Already paid' });
   if (!b.hasBill || !b.hasNote) return res.status(400).json({ error: 'Attach bill + visit note before paying' });
   if (!(b.rate > 0)) return res.status(400).json({ error: 'Set the payout amount first (auto-calculates when the branch has a numeric rate)' });
   const paidDate = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
-  db.prepare("UPDATE bills SET status='paid',paidDate=? WHERE id=?").run(paidDate, b.id);
-  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(b.providerId) as any;
+  await q.run("UPDATE bills SET status='paid',paidDate=? WHERE id=?", paidDate, b.id);
+  const pr = await q.get('SELECT name FROM providers WHERE id=?', b.providerId) as any;
   // Notes are visible to all staff — payments display as satisfied in full at the billed
   // amount; the actual contracted payout lives only in the admin Financials tab.
-  addNote(b.patientId, `Payment sent to ${pr?.name} — DOS ${fmtDate(b.dos)} bill (${fmt$(b.billed)}) paid in full at the contracted terms`, req.user!.name);
-  audit(req.user!, 'bill.pay', 'bill', b.id, String(b.rate));
-  sendPatient(req, res, b.patientId);
+  await addNote(b.patientId, `Payment sent to ${pr?.name} — DOS ${fmtDate(b.dos)} bill (${fmt$(b.billed)}) paid in full at the contracted terms`, req.user!.name);
+  await audit(req.user!, 'bill.pay', 'bill', b.id, String(b.rate));
+  await sendPatient(req, res, b.patientId);
 });
 
-api.post('/patients/:id/receipts', (req, res) => {
+api.post('/patients/:id/receipts', async (req, res) => {
   const v = req.body || {};
   if (!(Number(v.amount) > 0)) return res.status(400).json({ error: 'Amount must be a positive number' });
-  db.prepare('INSERT INTO receipts(patientId,date,ref,amount,status) VALUES(?,?,?,?,?)')
-    .run(req.params.id, v.date || null, v.ref || null, Number(v.amount), v.status || 'Pending');
-  addNote(req.params.id, `Insurance receipt recorded: ${fmt$(Number(v.amount))} (${v.ref || ''})`, req.user!.name);
-  audit(req.user!, 'receipt.create', 'patient', req.params.id, String(v.amount));
-  sendPatient(req, res, req.params.id);
+  await q.run('INSERT INTO receipts(patientId,date,ref,amount,status) VALUES(?,?,?,?,?)', req.params.id, v.date || null, v.ref || null, Number(v.amount), v.status || 'Pending');
+  await addNote(req.params.id, `Insurance receipt recorded: ${fmt$(Number(v.amount))} (${v.ref || ''})`, req.user!.name);
+  await audit(req.user!, 'receipt.create', 'patient', req.params.id, String(v.amount));
+  await sendPatient(req, res, req.params.id);
 });
 
-api.post('/receipts/:rid/toggle', (req, res) => {
-  const r = db.prepare('SELECT * FROM receipts WHERE id=?').get(req.params.rid) as any;
+api.post('/receipts/:rid/toggle', async (req, res) => {
+  const r = await q.get('SELECT * FROM receipts WHERE id=?', req.params.rid) as any;
   if (!r) return res.status(404).json({ error: 'Not found' });
   if (r.voided) return res.status(400).json({ error: 'Receipt is voided' });
   const status = r.status === 'Cleared' ? 'Pending' : 'Cleared';
-  db.prepare('UPDATE receipts SET status=? WHERE id=?').run(status, r.id);
-  addNote(r.patientId, `Receipt ${status.toLowerCase()}: ${fmt$(r.amount)} (${r.ref || ''})`, req.user!.name);
-  audit(req.user!, 'receipt.toggle', 'receipt', String(r.id), status);
-  sendPatient(req, res, r.patientId);
+  await q.run('UPDATE receipts SET status=? WHERE id=?', status, r.id);
+  await addNote(r.patientId, `Receipt ${status.toLowerCase()}: ${fmt$(r.amount)} (${r.ref || ''})`, req.user!.name);
+  await audit(req.user!, 'receipt.toggle', 'receipt', String(r.id), status);
+  await sendPatient(req, res, r.patientId);
 });
 
 /* ---- sent docs & documents ---- */
-api.post('/patients/:id/sentdocs', (req, res) => {
+api.post('/patients/:id/sentdocs', async (req, res) => {
   const v = req.body || {};
   if (!v.name) return res.status(400).json({ error: 'Template required' });
-  const info = db.prepare('INSERT INTO sent_docs(patientId,name,toStr,time,status,method,meta) VALUES(?,?,?,?,?,?,?)')
-    .run(req.params.id, v.name, v.to || '—', nowMST(), 'Sent', v.method || 'Email',
+  const info = await q.run('INSERT INTO sent_docs(patientId,name,toStr,time,status,method,meta) VALUES(?,?,?,?,?,?,?)', req.params.id, v.name, v.to || '—', nowMST(), 'Sent', v.method || 'Email',
       JSON.stringify({ kind: 'template', email: v.email || null }));
-  addNote(req.params.id, `Contract sent: "${v.name}" to ${v.to || '—'} via ${v.method || 'Email'}`, req.user!.name);
-  audit(req.user!, 'sentdoc.create', 'patient', req.params.id, v.name);
-  const pt = db.prepare('SELECT name FROM patients WHERE id=?').get(req.params.id) as any;
-  sendPatient(req, res, req.params.id, {
+  await addNote(req.params.id, `Contract sent: "${v.name}" to ${v.to || '—'} via ${v.method || 'Email'}`, req.user!.name);
+  await audit(req.user!, 'sentdoc.create', 'patient', req.params.id, v.name);
+  const pt = await q.get('SELECT name FROM patients WHERE id=?', req.params.id) as any;
+  await sendPatient(req, res, req.params.id, {
     _doc: {
       url: `/api/patients/${req.params.id}/sentdoc/${info.lastInsertRowid}/print`,
       mailto: `mailto:${encodeURIComponent(v.email || '')}`
@@ -1540,58 +1510,54 @@ api.post('/patients/:id/sentdocs', (req, res) => {
   });
 });
 
-api.post('/sentdocs/:sid/advance', (req, res) => {
-  const d = db.prepare('SELECT * FROM sent_docs WHERE id=?').get(req.params.sid) as any;
+api.post('/sentdocs/:sid/advance', async (req, res) => {
+  const d = await q.get('SELECT * FROM sent_docs WHERE id=?', req.params.sid) as any;
   if (!d) return res.status(404).json({ error: 'Not found' });
   const status = d.status === 'Sent' ? 'Viewed' : 'Signed';
-  db.prepare('UPDATE sent_docs SET status=? WHERE id=?').run(status, d.id);
+  await q.run('UPDATE sent_docs SET status=? WHERE id=?', status, d.id);
   if (status === 'Signed') {
-    addNote(d.patientId, `Contract signed: "${d.name}" by ${d.toStr}`, req.user!.name);
+    await addNote(d.patientId, `Contract signed: "${d.name}" by ${d.toStr}`, req.user!.name);
     if (/bill pay|mbpa|mppa|lac|consent/i.test(d.name)) {
-      db.prepare('UPDATE patients SET consentSharing=1 WHERE id=?').run(d.patientId);
-      addNote(d.patientId, '✓ Patient consent on file — carrier portal may now access bills & records for this case', req.user!.name);
+      await q.run('UPDATE patients SET consentSharing=1 WHERE id=?', d.patientId);
+      await addNote(d.patientId, '✓ Patient consent on file — carrier portal may now access bills & records for this case', req.user!.name);
     }
   }
-  audit(req.user!, 'sentdoc.advance', 'sentdoc', String(d.id), status);
-  sendPatient(req, res, d.patientId);
+  await audit(req.user!, 'sentdoc.advance', 'sentdoc', String(d.id), status);
+  await sendPatient(req, res, d.patientId);
 });
 
-api.post('/patients/:id/documents', upload.single('file'), persistUploads, (req, res) => {
+api.post('/patients/:id/documents', upload.single('file'), persistUploads, async (req, res) => {
   const name = req.file?.originalname || String(req.body?.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Name or file required' });
   let fid: string | null = null;
   if (req.file) {
     fid = req.file.filename;
-    db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
-      .run(fid, name, req.file.mimetype, req.file.size, req.user!.name, nowMST());
+    await q.run('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)', fid, name, req.file.mimetype, req.file.size, req.user!.name, nowMST());
   }
-  db.prepare('INSERT INTO documents(patientId,name,cat,meta,fileId) VALUES(?,?,?,?,?)')
-    .run(req.params.id, name, req.body?.cat || 'Other', nowMST() + ' · ' + req.user!.name, fid);
-  addNote(req.params.id, `Document added: "${name}"`, req.user!.name);
-  audit(req.user!, 'document.create', 'patient', req.params.id, name);
-  sendPatient(req, res, req.params.id);
+  await q.run('INSERT INTO documents(patientId,name,cat,meta,fileId) VALUES(?,?,?,?,?)', req.params.id, name, req.body?.cat || 'Other', nowMST() + ' · ' + req.user!.name, fid);
+  await addNote(req.params.id, `Document added: "${name}"`, req.user!.name);
+  await audit(req.user!, 'document.create', 'patient', req.params.id, name);
+  await sendPatient(req, res, req.params.id);
 });
 
 /* ================= providers ================= */
-api.post('/providers', (req, res) => {
+api.post('/providers', async (req, res) => {
   const v = req.body || {};
   if (!String(v.name || '').trim()) return res.status(400).json({ error: 'Name required' });
-  const id = nextId('md');
-  db.prepare('INSERT INTO providers(id,name,type,status,corpAddress,corpPhone,corpEmail,taxId,rules) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(id, v.name, v.type || null, JSON.stringify(v.status || []), v.corpAddress || null, v.corpPhone || null, v.corpEmail || null, v.taxId || null, JSON.stringify(v.rules || []));
+  const id = await nextId('md');
+  await q.run('INSERT INTO providers(id,name,type,status,corpAddress,corpPhone,corpEmail,taxId,rules) VALUES(?,?,?,?,?,?,?,?,?)', id, v.name, v.type || null, JSON.stringify(v.status || []), v.corpAddress || null, v.corpPhone || null, v.corpEmail || null, v.taxId || null, JSON.stringify(v.rules || []));
   if (v.branch?.name) {
     const b = v.branch;
-    db.prepare('INSERT INTO branches(providerId,name,address,phone,email,contacts,rate,status,ratePct,rateCap) VALUES(?,?,?,?,?,?,?,?,?,?)')
-      .run(id, b.name, b.address || null, b.phone || null, b.email || null, b.contacts || null, b.rate || null, (v.status || [])[0] || 'Under contract',
+    await q.run('INSERT INTO branches(providerId,name,address,phone,email,contacts,rate,status,ratePct,rateCap) VALUES(?,?,?,?,?,?,?,?,?,?)', id, b.name, b.address || null, b.phone || null, b.email || null, b.contacts || null, b.rate || null, (v.status || [])[0] || 'Under contract',
         Number(b.ratePct) || null, Number(b.rateCap) || null);
   }
-  audit(req.user!, 'provider.create', 'provider', id, v.name);
-  res.json(fullProvider(id));
+  await audit(req.user!, 'provider.create', 'provider', id, v.name);
+  res.json(await fullProvider(id));
 });
 
-api.patch('/providers/:id', (req, res) => {
+api.patch('/providers/:id', async (req, res) => {
   const v = req.body || {};
-  const pr = db.prepare('SELECT * FROM providers WHERE id=?').get(req.params.id) as any;
+  const pr = await q.get('SELECT * FROM providers WHERE id=?', req.params.id) as any;
   if (!pr) return res.status(404).json({ error: 'Not found' });
   // "Under contract" is DERIVED from the BAA + rate agreement being signed — a status
   // edit can neither grant it (without the signatures) nor accidentally remove it.
@@ -1599,166 +1565,154 @@ api.patch('/providers/:id', (req, res) => {
   const gate = !!(pr.baaSignedAt && pr.rateAgreementSignedAt);
   status = status.filter(s => s !== 'Under contract');
   if (gate) status.push('Under contract');
-  db.prepare('UPDATE providers SET name=?,type=?,status=?,corpAddress=?,corpPhone=?,corpEmail=?,taxId=?,rules=? WHERE id=?')
-    .run(v.name, v.type || null, JSON.stringify(status), v.corpAddress || null, v.corpPhone || null, v.corpEmail || null, v.taxId || null, JSON.stringify(v.rules || []), req.params.id);
+  await q.run('UPDATE providers SET name=?,type=?,status=?,corpAddress=?,corpPhone=?,corpEmail=?,taxId=?,rules=? WHERE id=?', v.name, v.type || null, JSON.stringify(status), v.corpAddress || null, v.corpPhone || null, v.corpEmail || null, v.taxId || null, JSON.stringify(v.rules || []), req.params.id);
   for (const c of ['npi', 'licenseNo', 'licenseExp', 'malpracticeCarrier', 'malpracticeExp', 'w9OnFile', 'baaSigned', 'conservative', 'orgType'])
-    if (c in v) db.prepare(`UPDATE providers SET ${c}=? WHERE id=?`).run(v[c] || null, req.params.id);
-  audit(req.user!, 'provider.update', 'provider', req.params.id);
-  res.json(fullProvider(req.params.id));
+    if (c in v) await q.run(`UPDATE providers SET ${c}=? WHERE id=?`, v[c] || null, req.params.id);
+  await audit(req.user!, 'provider.update', 'provider', req.params.id);
+  res.json(await fullProvider(req.params.id));
 });
 
-api.get('/providers/:id/stats', (req, res) => {
-  const pr = fullProvider(req.params.id);
+api.get('/providers/:id/stats', async (req, res) => {
+  const pr = await fullProvider(req.params.id);
   if (!pr) return res.status(404).json({ error: 'Not found' });
-  res.json(pr.branches.map((b: any) => ({ branchId: b.id, ...branchStats(pr.id, b.name, pr.branches.length), disputes: b.disputes })));
+  res.json(await Promise.all(pr.branches.map(async (b: any) => ({ branchId: b.id, ...await branchStats(pr.id, b.name, pr.branches.length), disputes: b.disputes }))))
 });
 
-api.post('/providers/:id/branches', (req, res) => {
+api.post('/providers/:id/branches', async (req, res) => {
   const v = req.body || {};
   if (!String(v.name || '').trim()) return res.status(400).json({ error: 'Name required' });
-  db.prepare('INSERT INTO branches(providerId,name,address,phone,email,contacts,rate,status,ratePct,rateCap) VALUES(?,?,?,?,?,?,?,?,?,?)')
-    .run(req.params.id, v.name, v.address || null, v.phone || null, v.email || null, v.contacts || null, v.rate || null,
+  await q.run('INSERT INTO branches(providerId,name,address,phone,email,contacts,rate,status,ratePct,rateCap) VALUES(?,?,?,?,?,?,?,?,?,?)', req.params.id, v.name, v.address || null, v.phone || null, v.email || null, v.contacts || null, v.rate || null,
       v.status || 'Under contract', Number(v.ratePct) || null, Number(v.rateCap) || null);
-  audit(req.user!, 'branch.create', 'provider', req.params.id, v.name);
-  res.json(fullProvider(req.params.id));
+  await audit(req.user!, 'branch.create', 'provider', req.params.id, v.name);
+  res.json(await fullProvider(req.params.id));
 });
 
-api.patch('/branches/:bid', (req, res) => {
-  const b = db.prepare('SELECT * FROM branches WHERE id=?').get(req.params.bid) as any;
+api.patch('/branches/:bid', async (req, res) => {
+  const b = await q.get('SELECT * FROM branches WHERE id=?', req.params.bid) as any;
   if (!b) return res.status(404).json({ error: 'Not found' });
   const v = req.body || {};
-  db.prepare('UPDATE branches SET name=?,address=?,phone=?,email=?,contacts=?,rate=?,status=?,contract=?,disputes=?,ratePct=?,rateCap=? WHERE id=?')
-    .run(v.name ?? b.name, v.address ?? b.address, v.phone ?? b.phone, v.email ?? b.email, v.contacts ?? b.contacts,
+  await q.run('UPDATE branches SET name=?,address=?,phone=?,email=?,contacts=?,rate=?,status=?,contract=?,disputes=?,ratePct=?,rateCap=? WHERE id=?', v.name ?? b.name, v.address ?? b.address, v.phone ?? b.phone, v.email ?? b.email, v.contacts ?? b.contacts,
       v.rate ?? b.rate, v.status ?? b.status, v.contract ?? b.contract, Number(v.disputes ?? b.disputes) || 0,
       v.ratePct !== undefined ? (Number(v.ratePct) || null) : b.ratePct,
       v.rateCap !== undefined ? (Number(v.rateCap) || null) : b.rateCap, b.id);
   if (v.name && v.name !== b.name)
-    db.prepare('UPDATE prov_links SET branch=? WHERE providerId=? AND branch=?').run(v.name, b.providerId, b.name);
-  audit(req.user!, 'branch.update', 'branch', String(b.id));
-  res.json(fullProvider(b.providerId));
+    await q.run('UPDATE prov_links SET branch=? WHERE providerId=? AND branch=?', v.name, b.providerId, b.name);
+  await audit(req.user!, 'branch.update', 'branch', String(b.id));
+  res.json(await fullProvider(b.providerId));
 });
 
 /* ================= insurers ================= */
-api.post('/insurers', (req, res) => {
+api.post('/insurers', async (req, res) => {
   const v = req.body || {};
   if (!String(v.name || '').trim()) return res.status(400).json({ error: 'Name required' });
-  const id = nextId('ins');
-  db.prepare('INSERT INTO insurers(id,name,hq,phone,email,relationship,payRate,states,rules) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(id, v.name, v.hq || null, v.phone || null, v.email || null, v.relationship || null, v.payRate || null,
+  const id = await nextId('ins');
+  await q.run('INSERT INTO insurers(id,name,hq,phone,email,relationship,payRate,states,rules) VALUES(?,?,?,?,?,?,?,?,?)', id, v.name, v.hq || null, v.phone || null, v.email || null, v.relationship || null, v.payRate || null,
       JSON.stringify(v.states || []), JSON.stringify(v.rules || []));
   if (v.adjuster?.name)
-    db.prepare('INSERT INTO adjusters(id,insurerId,name,phone,email) VALUES(?,?,?,?,?)')
-      .run('a' + Date.now(), id, v.adjuster.name, v.adjuster.phone || null, v.adjuster.email || null);
-  audit(req.user!, 'insurer.create', 'insurer', id, v.name);
-  res.json(fullInsurer(id));
+    await q.run('INSERT INTO adjusters(id,insurerId,name,phone,email) VALUES(?,?,?,?,?)', 'a' + Date.now(), id, v.adjuster.name, v.adjuster.phone || null, v.adjuster.email || null);
+  await audit(req.user!, 'insurer.create', 'insurer', id, v.name);
+  res.json(await fullInsurer(id));
 });
 
-api.patch('/insurers/:id', (req, res) => {
-  const c = db.prepare('SELECT id FROM insurers WHERE id=?').get(req.params.id);
+api.patch('/insurers/:id', async (req, res) => {
+  const c = await q.get('SELECT id FROM insurers WHERE id=?', req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
   const v = req.body || {};
-  db.prepare('UPDATE insurers SET name=?,hq=?,phone=?,email=?,relationship=?,payRate=?,states=?,rules=? WHERE id=?')
-    .run(v.name, v.hq || null, v.phone || null, v.email || null, v.relationship || null, v.payRate || null,
+  await q.run('UPDATE insurers SET name=?,hq=?,phone=?,email=?,relationship=?,payRate=?,states=?,rules=? WHERE id=?', v.name, v.hq || null, v.phone || null, v.email || null, v.relationship || null, v.payRate || null,
       JSON.stringify(v.states || []), JSON.stringify(v.rules || []), req.params.id);
-  audit(req.user!, 'insurer.update', 'insurer', req.params.id);
-  res.json(fullInsurer(req.params.id));
+  await audit(req.user!, 'insurer.update', 'insurer', req.params.id);
+  res.json(await fullInsurer(req.params.id));
 });
 
-api.patch('/insurers/:id/manual-stats', (req, res) => {
+api.patch('/insurers/:id/manual-stats', async (req, res) => {
   const v = req.body || {};
-  db.prepare('UPDATE insurers SET avgDays=?,disputes=?,denialRate=? WHERE id=?')
-    .run(Number(v.avgDays) || 0, Number(v.disputes) || 0, Number(v.denialRate) || 0, req.params.id);
-  audit(req.user!, 'insurer.manualStats', 'insurer', req.params.id);
-  res.json(fullInsurer(req.params.id));
+  await q.run('UPDATE insurers SET avgDays=?,disputes=?,denialRate=? WHERE id=?', Number(v.avgDays) || 0, Number(v.disputes) || 0, Number(v.denialRate) || 0, req.params.id);
+  await audit(req.user!, 'insurer.manualStats', 'insurer', req.params.id);
+  res.json(await fullInsurer(req.params.id));
 });
 
-api.get('/insurers/:id/stats', requireAdmin, (req, res) => {
-  const c = fullInsurer(req.params.id);
+api.get('/insurers/:id/stats', requireAdmin, async (req, res) => {
+  const c = await fullInsurer(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
-  res.json({ ...insAutoStats(c.id), avgDays: c.avgDays, disputes: c.disputes, denialRate: c.denialRate });
+  res.json({ ...await insAutoStats(c.id), avgDays: c.avgDays, disputes: c.disputes, denialRate: c.denialRate });
 });
 
-api.post('/insurers/:id/adjusters', (req, res) => {
+api.post('/insurers/:id/adjusters', async (req, res) => {
   const v = req.body || {};
   if (!String(v.name || '').trim()) return res.status(400).json({ error: 'Name required' });
-  db.prepare('INSERT INTO adjusters(id,insurerId,name,phone,email,contract,notes) VALUES(?,?,?,?,?,?,?)')
-    .run('a' + Date.now(), req.params.id, v.name, v.phone || null, v.email || null, v.contract || null, v.notes || null);
-  audit(req.user!, 'adjuster.create', 'insurer', req.params.id, v.name);
-  res.json(fullInsurer(req.params.id));
+  await q.run('INSERT INTO adjusters(id,insurerId,name,phone,email,contract,notes) VALUES(?,?,?,?,?,?,?)', 'a' + Date.now(), req.params.id, v.name, v.phone || null, v.email || null, v.contract || null, v.notes || null);
+  await audit(req.user!, 'adjuster.create', 'insurer', req.params.id, v.name);
+  res.json(await fullInsurer(req.params.id));
 });
 
-api.patch('/adjusters/:aid', (req, res) => {
-  const a = db.prepare('SELECT * FROM adjusters WHERE id=?').get(req.params.aid) as any;
+api.patch('/adjusters/:aid', async (req, res) => {
+  const a = await q.get('SELECT * FROM adjusters WHERE id=?', req.params.aid) as any;
   if (!a) return res.status(404).json({ error: 'Not found' });
   const v = req.body || {};
-  db.prepare('UPDATE adjusters SET name=?,phone=?,email=?,contract=?,notes=? WHERE id=?')
-    .run(v.name ?? a.name, v.phone ?? a.phone, v.email ?? a.email, v.contract ?? a.contract, v.notes ?? a.notes, a.id);
-  audit(req.user!, 'adjuster.update', 'adjuster', a.id);
-  res.json(fullInsurer(a.insurerId));
+  await q.run('UPDATE adjusters SET name=?,phone=?,email=?,contract=?,notes=? WHERE id=?', v.name ?? a.name, v.phone ?? a.phone, v.email ?? a.email, v.contract ?? a.contract, v.notes ?? a.notes, a.id);
+  await audit(req.user!, 'adjuster.update', 'adjuster', a.id);
+  res.json(await fullInsurer(a.insurerId));
 });
 
-api.post('/insurers/:id/contracts', (req, res) => {
+api.post('/insurers/:id/contracts', async (req, res) => {
   const v = req.body || {};
   if (!String(v.name || '').trim()) return res.status(400).json({ error: 'Name required' });
   const scope = v.scope === 'adjuster' ? 'adjuster' : 'carrier';
   if (scope === 'adjuster' && !v.adjusterId) return res.status(400).json({ error: 'Pick the adjuster for an adjuster-scope contract' });
   // Contract rate (% of billed the carrier pays us) is admin-only — silently ignored otherwise.
   const rate = req.user!.role === 'admin' && v.rate !== '' && v.rate != null ? Number(v.rate) : null;
-  db.prepare('INSERT INTO ins_contracts(insurerId,name,meta,status,scope,adjusterId,rate) VALUES(?,?,?,?,?,?,?)')
-    .run(req.params.id, v.name, v.meta || null, v.status || 'Active', scope, scope === 'adjuster' ? v.adjusterId : null, rate);
-  audit(req.user!, 'insContract.create', 'insurer', req.params.id, `${v.name} (${scope})`);
-  res.json(fullInsurer(req.params.id));
+  await q.run('INSERT INTO ins_contracts(insurerId,name,meta,status,scope,adjusterId,rate) VALUES(?,?,?,?,?,?,?)', req.params.id, v.name, v.meta || null, v.status || 'Active', scope, scope === 'adjuster' ? v.adjusterId : null, rate);
+  await audit(req.user!, 'insContract.create', 'insurer', req.params.id, `${v.name} (${scope})`);
+  res.json(await fullInsurer(req.params.id));
 });
 
 /* ================= AI requests ================= */
-api.get('/ai', (_req, res) => res.json(db.prepare('SELECT * FROM ai_requests ORDER BY id DESC').all()));
-api.post('/ai', (req, res) => {
+api.get('/ai', async (_req, res) => res.json(await q.all('SELECT * FROM ai_requests ORDER BY id DESC')));
+api.post('/ai', async (req, res) => {
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Empty' });
-  db.prepare('INSERT INTO ai_requests(text,time,status,by) VALUES(?,?,?,?)').run(text, nowMST(), 'pending', req.user!.name);
-  audit(req.user!, 'ai.request', undefined, undefined, text);
-  res.json(db.prepare('SELECT * FROM ai_requests ORDER BY id DESC').all());
+  await q.run('INSERT INTO ai_requests(text,time,status,by) VALUES(?,?,?,?)', text, nowMST(), 'pending', req.user!.name);
+  await audit(req.user!, 'ai.request', undefined, undefined, text);
+  res.json(await q.all('SELECT * FROM ai_requests ORDER BY id DESC'));
 });
-api.post('/ai/:aid/decide', requireAdmin, (req, res) => {
+api.post('/ai/:aid/decide', requireAdmin, async (req, res) => {
   const status = req.body?.status === 'approved' ? 'approved' : 'denied';
-  db.prepare('UPDATE ai_requests SET status=? WHERE id=?').run(status, req.params.aid);
-  audit(req.user!, 'ai.' + status, 'ai', req.params.aid);
-  res.json(db.prepare('SELECT * FROM ai_requests ORDER BY id DESC').all());
+  await q.run('UPDATE ai_requests SET status=? WHERE id=?', status, req.params.aid);
+  await audit(req.user!, 'ai.' + status, 'ai', req.params.aid);
+  res.json(await q.all('SELECT * FROM ai_requests ORDER BY id DESC'));
 });
 
 /* ================= widget prefs ================= */
-api.put('/prefs/:key', (req, res) => {
+api.put('/prefs/:key', async (req, res) => {
   const { color, size } = req.body || {};
-  const existing = db.prepare('SELECT * FROM widget_prefs WHERE userId=? AND key=?').get(req.user!.id, req.params.key) as any;
-  db.prepare(`INSERT INTO widget_prefs(userId,key,color,size) VALUES(?,?,?,?)
-    ON CONFLICT(userId,key) DO UPDATE SET color=?, size=?`)
-    .run(req.user!.id, req.params.key,
+  const existing = await q.get('SELECT * FROM widget_prefs WHERE userId=? AND key=?', req.user!.id, req.params.key) as any;
+  await q.run(`INSERT INTO widget_prefs(userId,key,color,size) VALUES(?,?,?,?)
+    ON CONFLICT(userId,key) DO UPDATE SET color=?, size=?`, req.user!.id, req.params.key,
       color ?? existing?.color ?? null, size ?? existing?.size ?? null,
       color ?? existing?.color ?? null, size ?? existing?.size ?? null);
-  res.json(db.prepare('SELECT key,color,size FROM widget_prefs WHERE userId=?').all(req.user!.id));
+  res.json(await q.all('SELECT key,color,size FROM widget_prefs WHERE userId=?', req.user!.id));
 });
 
 /* ================= admin: user management ================= */
-api.get('/admin/users', requireAdmin, (_req, res) =>
-  res.json((db.prepare('SELECT id,name,email,role,active,totpSecret,orgId,approved,perms FROM users').all() as any[])
-    .map(u => ({
+api.get('/admin/users', requireAdmin, async (req, res) =>
+  res.json(await Promise.all((await q.all('SELECT id,name,email,role,active,totpSecret,orgId,approved,perms FROM users') as any[])
+    .map(async u => ({
       id: u.id, name: u.name, email: u.email, role: u.role, active: u.active,
       perms: (() => { try { return JSON.parse(u.perms || '[]'); } catch { return []; } })(),
       mfaEnrolled: !!u.totpSecret, approved: u.approved, orgId: u.orgId,
       orgName: u.orgId
-        ? ((db.prepare('SELECT name FROM providers WHERE id=?').get(u.orgId) as any)?.name
-          || (db.prepare('SELECT name FROM insurers WHERE id=?').get(u.orgId) as any)?.name || u.orgId)
+        ? ((await q.get('SELECT name FROM providers WHERE id=?', u.orgId) as any)?.name
+          || (await q.get('SELECT name FROM insurers WHERE id=?', u.orgId) as any)?.name || u.orgId)
         : null,
-    }))));
-
-api.post('/admin/users/:uid/approve', requireAdmin, (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.uid) as any;
+    })))));
+api.post('/admin/users/:uid/approve', requireAdmin, async (req, res) => {
+  const u = await q.get('SELECT * FROM users WHERE id=?', req.params.uid) as any;
   if (!u) return res.status(404).json({ error: 'Not found' });
   const approve = req.body?.approve !== false;
   const orgRole = req.body?.orgRole === 'admin' ? 'admin' : 'worker';
-  if (approve) db.prepare('UPDATE users SET approved=1, orgRole=? WHERE id=?').run(orgRole, u.id);
-  else db.prepare('UPDATE users SET approved=0, active=0 WHERE id=?').run(u.id);
-  audit(req.user!, approve ? 'admin.user.approve' : 'admin.user.denyAccess', 'user', u.id, u.email);
+  if (approve) await q.run('UPDATE users SET approved=1, orgRole=? WHERE id=?', orgRole, u.id);
+  else await q.run('UPDATE users SET approved=0, active=0 WHERE id=?', u.id);
+  await audit(req.user!, approve ? 'admin.user.approve' : 'admin.user.denyAccess', 'user', u.id, u.email);
   res.json({ ok: true });
 });
 
@@ -1767,15 +1721,14 @@ api.post('/admin/users', requireAdmin, async (req, res) => {
   if (!String(name || '').trim() || !String(email || '').trim()) return res.status(400).json({ error: 'Name and email required' });
   if (!['admin', 'coordinator', 'sales'].includes(role)) return res.status(400).json({ error: 'Role must be admin, coordinator, or sales' });
   if (password && String(password).length < 8) return res.status(400).json({ error: 'Temporary password must be at least 8 characters' });
-  if (db.prepare('SELECT 1 FROM users WHERE lower(email)=lower(?)').get(email)) return res.status(400).json({ error: 'That email already has an account' });
+  if (await q.get('SELECT 1 FROM users WHERE lower(email)=lower(?)', email)) return res.status(400).json({ error: 'That email already has an account' });
   const bcrypt = (await import('bcryptjs')).default;
   // No password given → generate a temp code and email it to the new user.
   // Either way the account is locked to /api/auth/* until they set their own password.
   const temp = password || 'T-' + crypto.randomBytes(5).toString('hex');
   const id = 'u' + Date.now();
-  db.prepare('INSERT INTO users(id,name,email,pwHash,role,active,mustChangePw) VALUES(?,?,?,?,?,1,1)')
-    .run(id, name.trim(), email.trim(), bcrypt.hashSync(temp, 10), role);
-  audit(req.user!, 'admin.user.create', 'user', id, `${name} (${role})${password ? '' : ' · temp code emailed'}`);
+  await q.run('INSERT INTO users(id,name,email,pwHash,role,active,mustChangePw) VALUES(?,?,?,?,?,1,1)', id, name.trim(), email.trim(), bcrypt.hashSync(temp, 10), role);
+  await audit(req.user!, 'admin.user.create', 'user', id, `${name} (${role})${password ? '' : ' · temp code emailed'}`);
   let emailed = false;
   if (!password) {
     const r = await sendMail({
@@ -1790,27 +1743,27 @@ api.post('/admin/users', requireAdmin, async (req, res) => {
   res.json({ ok: true, id, emailed, ...(password || emailed ? {} : { tempPassword: temp }) });
 });
 
-api.patch('/admin/users/:uid', requireAdmin, (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.uid) as any;
+api.patch('/admin/users/:uid', requireAdmin, async (req, res) => {
+  const u = await q.get('SELECT * FROM users WHERE id=?', req.params.uid) as any;
   if (!u) return res.status(404).json({ error: 'Not found' });
   const { role, active } = req.body || {};
   if (u.id === req.user!.id && ((role && role !== 'admin') || active === 0))
     return res.status(400).json({ error: "You can't demote or deactivate your own account" });
   if (role) {
     if (!['admin', 'coordinator', 'sales'].includes(role)) return res.status(400).json({ error: 'Bad role' });
-    db.prepare('UPDATE users SET role=? WHERE id=?').run(role, u.id);
-    audit(req.user!, 'admin.user.role', 'user', u.id, role);
+    await q.run('UPDATE users SET role=? WHERE id=?', role, u.id);
+    await audit(req.user!, 'admin.user.role', 'user', u.id, role);
   }
   if (active === 0 || active === 1) {
-    db.prepare('UPDATE users SET active=? WHERE id=?').run(active, u.id);
-    audit(req.user!, active ? 'admin.user.reactivate' : 'admin.user.deactivate', 'user', u.id, u.name);
+    await q.run('UPDATE users SET active=? WHERE id=?', active, u.id);
+    await audit(req.user!, active ? 'admin.user.reactivate' : 'admin.user.deactivate', 'user', u.id, u.name);
   }
   res.json({ ok: true });
 });
 
 /* Per-user tool grants (currently: 'fees'). Any admin can grant or revoke. */
-api.post('/admin/users/:uid/perms', requireAdmin, (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.uid) as any;
+api.post('/admin/users/:uid/perms', requireAdmin, async (req, res) => {
+  const u = await q.get('SELECT * FROM users WHERE id=?', req.params.uid) as any;
   if (!u) return res.status(404).json({ error: 'Not found' });
   const perm = String(req.body?.perm || '');
   if (!['fees', 'crm'].includes(perm)) return res.status(400).json({ error: 'Unknown permission' });
@@ -1819,38 +1772,38 @@ api.post('/admin/users/:uid/perms', requireAdmin, (req, res) => {
   const grant = req.body?.grant !== false;
   perms = perms.filter(p => p !== perm);
   if (grant) perms.push(perm);
-  db.prepare('UPDATE users SET perms=? WHERE id=?').run(JSON.stringify(perms), u.id);
-  audit(req.user!, grant ? 'admin.user.grantPerm' : 'admin.user.revokePerm', 'user', u.id, `${perm} — ${u.email}`);
+  await q.run('UPDATE users SET perms=? WHERE id=?', JSON.stringify(perms), u.id);
+  await audit(req.user!, grant ? 'admin.user.grantPerm' : 'admin.user.revokePerm', 'user', u.id, `${perm} — ${u.email}`);
   res.json({ ok: true, perms });
 });
 
 api.post('/admin/users/:uid/reset-password', requireAdmin, async (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.uid) as any;
+  const u = await q.get('SELECT * FROM users WHERE id=?', req.params.uid) as any;
   if (!u) return res.status(404).json({ error: 'Not found' });
   const pw = String(req.body?.password || '');
   if (pw.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
   const bcrypt = (await import('bcryptjs')).default;
-  db.prepare('UPDATE users SET pwHash=?, mustChangePw=1 WHERE id=?').run(bcrypt.hashSync(pw, 10), u.id);
-  audit(req.user!, 'admin.user.resetPassword', 'user', u.id, u.name);
+  await q.run('UPDATE users SET pwHash=?, mustChangePw=1 WHERE id=?', bcrypt.hashSync(pw, 10), u.id);
+  await audit(req.user!, 'admin.user.resetPassword', 'user', u.id, u.name);
   res.json({ ok: true });
 });
 
-api.post('/admin/users/:uid/reset-mfa', requireAdmin, (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.uid) as any;
+api.post('/admin/users/:uid/reset-mfa', requireAdmin, async (req, res) => {
+  const u = await q.get('SELECT * FROM users WHERE id=?', req.params.uid) as any;
   if (!u) return res.status(404).json({ error: 'Not found' });
-  db.prepare('UPDATE users SET totpSecret=NULL WHERE id=?').run(u.id);
-  audit(req.user!, 'admin.user.resetMfa', 'user', u.id, u.name);
+  await q.run('UPDATE users SET totpSecret=NULL WHERE id=?', u.id);
+  await audit(req.user!, 'admin.user.resetMfa', 'user', u.id, u.name);
   res.json({ ok: true, note: 'User will enroll a fresh authenticator at next login' });
 });
 
 /* ================= bill entry v2 — files inline, payout always auto ================= */
-api.post('/patients/:id/bills2', upload.fields([{ name: 'bill', maxCount: 1 }, { name: 'note', maxCount: 1 }]), persistUploads, (req, res) => {
+api.post('/patients/:id/bills2', upload.fields([{ name: 'bill', maxCount: 1 }, { name: 'note', maxCount: 1 }]), persistUploads, async (req, res) => {
   const v = req.body || {};
   const files = req.files as Record<string, Express.Multer.File[]> | undefined;
   const billFile = files?.bill?.[0]; const noteFile = files?.note?.[0];
-  const pr = db.prepare('SELECT name FROM providers WHERE id=?').get(v.providerId) as any;
+  const pr = await q.get('SELECT name FROM providers WHERE id=?', v.providerId) as any;
   if (!pr) return res.status(400).json({ error: 'Unknown provider' });
-  const link = db.prepare('SELECT * FROM prov_links WHERE patientId=? AND providerId=?').get(req.params.id, v.providerId) as any;
+  const link = await q.get('SELECT * FROM prov_links WHERE patientId=? AND providerId=?', req.params.id, v.providerId) as any;
   if (!link) return res.status(400).json({ error: 'Link this provider to the patient first (Treating Providers tab)' });
   if (!v.dos) return res.status(400).json({ error: 'Date of service required' });
   if (!billFile) return res.status(400).json({ error: 'Attach the bill document' });
@@ -1870,40 +1823,37 @@ api.post('/patients/:id/bills2', upload.fields([{ name: 'bill', maxCount: 1 }, {
     return res.status(400).json({ error: 'General invoices need a description' });
   }
 
-  const store = (f: Express.Multer.File) => {
-    db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
-      .run(f.filename, f.originalname, f.mimetype, f.size, req.user!.name, nowMST());
+  const store = async (f: Express.Multer.File) => {
+    await q.run('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)', f.filename, f.originalname, f.mimetype, f.size, req.user!.name, nowMST());
     return f.filename;
   };
-  const bfid = store(billFile);
-  const nfid = noteFile ? store(noteFile) : null;
+  const bfid = await store(billFile);
+  const nfid = noteFile ? await store(noteFile) : null;
   // Payout is ALWAYS computed from contracted terms — never entered by hand here.
-  const pRow = db.prepare('SELECT insurerId FROM patients WHERE id=?').get(req.params.id) as any;
-  const eco = computeBillEconomics(pRow?.insurerId || null, v.providerId, link.branch, items, billed, v.dos || null);
+  const pRow = await q.get('SELECT insurerId FROM patients WHERE id=?', req.params.id) as any;
+  const eco = await computeBillEconomics(pRow?.insurerId || null, v.providerId, link.branch, items, billed, v.dos || null);
   const bid = 'b' + Date.now() + Math.floor(Math.random() * 1000);
-  db.prepare(`INSERT INTO bills(id,patientId,providerId,dos,billed,rate,revenue,descr,hasBill,hasNote,billFileId,billFileName,noteFileId,noteFileName)
-    VALUES(?,?,?,?,?,?,?,?,1,?,?,?,?,?)`)
-    .run(bid, req.params.id, v.providerId, v.dos, billed, eco.payout || 0, eco.revenue, v.descr || null,
+  await q.run(`INSERT INTO bills(id,patientId,providerId,dos,billed,rate,revenue,descr,hasBill,hasNote,billFileId,billFileName,noteFileId,noteFileName)
+    VALUES(?,?,?,?,?,?,?,?,1,?,?,?,?,?)`, bid, req.params.id, v.providerId, v.dos, billed, eco.payout || 0, eco.revenue, v.descr || null,
       nfid ? 1 : 0, bfid, billFile.originalname, nfid, noteFile?.originalname || null);
   for (const x of items)
-    db.prepare('INSERT INTO bill_items(billId,cpt,icd,units,charge,modifier) VALUES(?,?,?,?,?,?)')
-      .run(bid, String(x.cpt).trim(), x.icd || null, Number(x.units) || 1, Number(x.charge) || 0, x.modifier || null);
-  db.prepare('UPDATE prov_links SET billed=billed+? WHERE patientId=? AND providerId=?').run(billed, req.params.id, v.providerId);
-  addNote(req.params.id, `${mode === 'invoice' ? 'Invoice' : 'Bill'} added: ${pr.name} · DOS ${fmtDate(v.dos)} · ${fmt$(billed)}${mode === 'invoice' ? ` — ${v.descr}` : ` · ${items.length} CPT line${items.length === 1 ? '' : 's'}`}${nfid ? '' : ' — visit note still needed to unlock payment'}`, req.user!.name);
-  audit(req.user!, 'bill.create2', 'bill', bid, `${mode} ${billed}`);
-  sendPatient(req, res, req.params.id);
+    await q.run('INSERT INTO bill_items(billId,cpt,icd,units,charge,modifier) VALUES(?,?,?,?,?,?)', bid, String(x.cpt).trim(), x.icd || null, Number(x.units) || 1, Number(x.charge) || 0, x.modifier || null);
+  await q.run('UPDATE prov_links SET billed=billed+? WHERE patientId=? AND providerId=?', billed, req.params.id, v.providerId);
+  await addNote(req.params.id, `${mode === 'invoice' ? 'Invoice' : 'Bill'} added: ${pr.name} · DOS ${fmtDate(v.dos)} · ${fmt$(billed)}${mode === 'invoice' ? ` — ${v.descr}` : ` · ${items.length} CPT line${items.length === 1 ? '' : 's'}`}${nfid ? '' : ' — visit note still needed to unlock payment'}`, req.user!.name);
+  await audit(req.user!, 'bill.create2', 'bill', bid, `${mode} ${billed}`);
+  await sendPatient(req, res, req.params.id);
 });
 
 /* ================= per-case financials — ADMIN ONLY (the margins tab) ================= */
-api.get('/patients/:id/financials', requireAdmin, (req, res) => {
-  const p = db.prepare('SELECT * FROM patients WHERE id=?').get(req.params.id) as any;
+api.get('/patients/:id/financials', requireAdmin, async (req, res) => {
+  const p = await q.get('SELECT * FROM patients WHERE id=?', req.params.id) as any;
   if (!p) return res.status(404).json({ error: 'Not found' });
   const zip = (String(p.address || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
-  const bills = db.prepare('SELECT * FROM bills WHERE patientId=? AND voided=0').all(p.id) as any[];
+  const bills = await q.all('SELECT * FROM bills WHERE patientId=? AND voided=0', p.id) as any[];
   const byProv = new Map<string, any[]>();
   for (const b of bills) (byProv.get(b.providerId) || byProv.set(b.providerId, []).get(b.providerId)!).push(b);
-  const providers = [...byProv.entries()].map(([pid, bs]) => {
-    const pr = db.prepare('SELECT name, type FROM providers WHERE id=?').get(pid) as any;
+  const providers = await Promise.all([...byProv.entries()].map(async ([pid, bs]) => {
+    const pr = await q.get('SELECT name, type FROM providers WHERE id=?', pid) as any;
     const billedTotal = bs.reduce((s, b) => s + b.billed, 0);
     const payoutTotal = bs.reduce((s, b) => s + (b.rate || 0), 0);
     const payoutPaid = bs.filter(b => b.status === 'paid').reduce((s, b) => s + (b.rate || 0), 0);
@@ -1911,9 +1861,9 @@ api.get('/patients/:id/financials', requireAdmin, (req, res) => {
     // Medicare comparison: sum current Medicare-allowed for every CPT line at the patient's ZIP
     let medicareTotal = 0, medicareLines = 0, totalLines = 0;
     for (const b of bs) {
-      for (const it of db.prepare('SELECT * FROM bill_items WHERE billId=?').all(b.id) as any[]) {
+      for (const it of await q.all('SELECT * FROM bill_items WHERE billId=?', b.id) as any[]) {
         totalLines++;
-        const m = it.cpt ? medicareFor(zip, it.cpt) : null;
+        const m = it.cpt ? await medicareFor(zip, it.cpt) : null;
         if (m != null) { medicareTotal += m * (Number(it.units) || 1); medicareLines++; }
       }
     }
@@ -1928,9 +1878,9 @@ api.get('/patients/:id/financials', requireAdmin, (req, res) => {
       medicareCoverage: totalLines ? `${medicareLines}/${totalLines} CPT lines benchmarked` : 'no CPT lines entered',
       marginProjected: Math.round(((bs.reduce((s, b) => s + (b.revenue || b.billed), 0)) - payoutTotal) * 100) / 100,
     };
-  });
-  const received = (db.prepare("SELECT COALESCE(SUM(amount),0) s FROM receipts WHERE patientId=? AND status='Cleared' AND voided=0").get(p.id) as any).s;
-  const pendingIn = (db.prepare("SELECT COALESCE(SUM(amount),0) s FROM receipts WHERE patientId=? AND status!='Cleared' AND voided=0").get(p.id) as any).s;
+  }));
+  const received = (await q.get("SELECT COALESCE(SUM(amount),0) s FROM receipts WHERE patientId=? AND status='Cleared' AND voided=0", p.id) as any).s;
+  const pendingIn = (await q.get("SELECT COALESCE(SUM(amount),0) s FROM receipts WHERE patientId=? AND status!='Cleared' AND voided=0", p.id) as any).s;
   const payoutPaid = bills.filter(b => b.status === 'paid').reduce((s, b) => s + (b.rate || 0), 0);
   const payoutProjected = bills.reduce((s, b) => s + (b.rate || 0), 0);
   const revenueProjected = bills.reduce((s, b) => s + (b.revenue || b.billed), 0);
@@ -1958,10 +1908,10 @@ api.get('/geo/code', async (req, res) => {
 });
 /* Batch: answers from cache immediately and queues the rest (Nominatim allows 1 lookup/sec
    globally, so a fresh map fills in over ~1s per new address). Client polls while pending>0. */
-api.post('/geo/batch', (req, res) => {
+api.post('/geo/batch', async (req, res) => {
   const addresses = Array.isArray(req.body?.addresses) ? req.body.addresses : [];
   if (!addresses.length) return res.status(400).json({ error: 'addresses[] required' });
-  res.json(geoBatch(addresses));
+  res.json(await geoBatch(addresses));
 });
 api.get('/geo/route', async (req, res) => {
   const { flat, flon, tlat, tlon } = req.query as any;
@@ -1972,86 +1922,85 @@ api.get('/geo/route', async (req, res) => {
 });
 
 /* ================= provider contracts: BAA + rate agreement gate ================= */
-api.post('/providers/:id/contract/:kind(baa|rate)', upload.single('file'), persistUploads, (req, res) => {
-  const pr = db.prepare('SELECT * FROM providers WHERE id=?').get(req.params.id) as any;
+api.post('/providers/:id/contract/:kind(baa|rate)', upload.single('file'), persistUploads, async (req, res) => {
+  const pr = await q.get('SELECT * FROM providers WHERE id=?', req.params.id) as any;
   if (!pr) return res.status(404).json({ error: 'Not found' });
   const kind = req.params.kind;
   const fileCol = kind === 'baa' ? 'baaFileId' : 'rateAgreementFileId';
   const signCol = kind === 'baa' ? 'baaSignedAt' : 'rateAgreementSignedAt';
   if (req.file) {
-    db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
-      .run(req.file.filename, req.file.originalname, req.file.mimetype, req.file.size, req.user!.name, nowMST());
-    db.prepare(`UPDATE providers SET ${fileCol}=? WHERE id=?`).run(req.file.filename, pr.id);
+    await q.run('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)', req.file.filename, req.file.originalname, req.file.mimetype, req.file.size, req.user!.name, nowMST());
+    await q.run(`UPDATE providers SET ${fileCol}=? WHERE id=?`, req.file.filename, pr.id);
   }
   if (req.body?.signed === '1' || req.body?.signed === 1 || req.body?.signed === true) {
-    db.prepare(`UPDATE providers SET ${signCol}=? WHERE id=?`).run(`Signed · ${nowMST()} · recorded by ${req.user!.name}`, pr.id);
+    await q.run(`UPDATE providers SET ${signCol}=? WHERE id=?`, `Signed · ${nowMST()} · recorded by ${req.user!.name}`, pr.id);
   }
-  const after = db.prepare('SELECT baaSignedAt, rateAgreementSignedAt, status FROM providers WHERE id=?').get(pr.id) as any;
+  const after = await q.get('SELECT baaSignedAt, rateAgreementSignedAt, status FROM providers WHERE id=?', pr.id) as any;
   // Both signed → the provider becomes Under contract (this is the only path to that status).
   if (after.baaSignedAt && after.rateAgreementSignedAt) {
     let st: string[] = []; try { st = JSON.parse(after.status || '[]'); } catch { /* reset */ }
     if (!st.includes('Under contract')) {
       st = st.filter(s => s !== 'Single case agreement'); st.push('Under contract');
-      db.prepare('UPDATE providers SET status=? WHERE id=?').run(JSON.stringify(st), pr.id);
-      audit(req.user!, 'provider.underContract', 'provider', pr.id, 'BAA + rate agreement both signed');
+      await q.run('UPDATE providers SET status=? WHERE id=?', JSON.stringify(st), pr.id);
+      await audit(req.user!, 'provider.underContract', 'provider', pr.id, 'BAA + rate agreement both signed');
     }
   }
-  audit(req.user!, `provider.contract.${kind}`, 'provider', pr.id, req.file?.originalname || 'marked signed');
-  res.json(fullProvider(pr.id));
+  await audit(req.user!, `provider.contract.${kind}`, 'provider', pr.id, req.file?.originalname || 'marked signed');
+  res.json(await fullProvider(pr.id));
 });
 
 /* Admin-only provider business terms (contracted rate + contract files). */
-api.get('/providers/:id/admin', requireAdmin, (req, res) => {
-  const pr = db.prepare('SELECT id, name, contractedRate, baaFileId, baaSignedAt, rateAgreementFileId, rateAgreementSignedAt, orgType FROM providers WHERE id=?').get(req.params.id) as any;
+api.get('/providers/:id/admin', requireAdmin, async (req, res) => {
+  const pr = await q.get('SELECT id, name, contractedRate, baaFileId, baaSignedAt, rateAgreementFileId, rateAgreementSignedAt, orgType FROM providers WHERE id=?', req.params.id) as any;
   if (!pr) return res.status(404).json({ error: 'Not found' });
   res.json(pr);
 });
-api.post('/providers/:id/contracted-rate', requireAdmin, (req, res) => {
-  const pr = db.prepare('SELECT id, name FROM providers WHERE id=?').get(req.params.id) as any;
+api.post('/providers/:id/contracted-rate', requireAdmin, async (req, res) => {
+  const pr = await q.get('SELECT id, name FROM providers WHERE id=?', req.params.id) as any;
   if (!pr) return res.status(404).json({ error: 'Not found' });
-  db.prepare('UPDATE providers SET contractedRate=? WHERE id=?').run(String(req.body?.rate || '').trim() || null, pr.id);
-  audit(req.user!, 'provider.contractedRate', 'provider', pr.id);
+  await q.run('UPDATE providers SET contractedRate=? WHERE id=?', String(req.body?.rate || '').trim() || null, pr.id);
+  await audit(req.user!, 'provider.contractedRate', 'provider', pr.id);
   res.json({ ok: true });
 });
 
 /* ================= insurer contracts: master vs per-adjuster, admin-only rates ================= */
-api.patch('/ins-contracts/:cid', (req, res) => {
-  const c = db.prepare('SELECT * FROM ins_contracts WHERE id=?').get(req.params.cid) as any;
+api.patch('/ins-contracts/:cid', async (req, res) => {
+  const c = await q.get('SELECT * FROM ins_contracts WHERE id=?', req.params.cid) as any;
   if (!c) return res.status(404).json({ error: 'Not found' });
   const v = req.body || {};
-  if (v.status) db.prepare('UPDATE ins_contracts SET status=? WHERE id=?').run(String(v.status), c.id);
+  if (v.status) await q.run('UPDATE ins_contracts SET status=? WHERE id=?', String(v.status), c.id);
   if ('rate' in v) {
     if (req.user!.role !== 'admin') return res.status(403).json({ error: 'Contract rates are admin-only' });
-    db.prepare('UPDATE ins_contracts SET rate=? WHERE id=?').run(v.rate === '' || v.rate == null ? null : Number(v.rate), c.id);
+    await q.run('UPDATE ins_contracts SET rate=? WHERE id=?', v.rate === '' || v.rate == null ? null : Number(v.rate), c.id);
   }
-  audit(req.user!, 'insContract.update', 'insurer', c.insurerId, `${c.name}: ${v.status || ''}${'rate' in v ? ' rate set' : ''}`);
+  await audit(req.user!, 'insContract.update', 'insurer', c.insurerId, `${c.name}: ${v.status || ''}${'rate' in v ? ' rate set' : ''}`);
   res.json({ ok: true });
 });
-api.get('/insurers/:id/contract-rates', requireAdmin, (req, res) =>
-  res.json(db.prepare('SELECT id, name, scope, adjusterId, rate FROM ins_contracts WHERE insurerId=?').all(req.params.id)));
+api.get('/insurers/:id/contract-rates', requireAdmin, async (req, res) =>
+  res.json(await q.all('SELECT id, name, scope, adjusterId, rate FROM ins_contracts WHERE insurerId=?', req.params.id)));
 
 /* ================= admin: delete account (deactivate's permanent sibling) ================= */
-api.delete('/admin/users/:uid', requireAdmin, (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.uid) as any;
+api.delete('/admin/users/:uid', requireAdmin, async (req, res) => {
+  const u = await q.get('SELECT * FROM users WHERE id=?', req.params.uid) as any;
   if (!u) return res.status(404).json({ error: 'Not found' });
   if (u.id === req.user!.id) return res.status(400).json({ error: "You can't delete your own account" });
-  const assigned = (db.prepare('SELECT COUNT(*) c FROM patients WHERE coordinator=? AND stage<4').get(u.id) as any).c;
+  const assigned = (await q.get('SELECT COUNT(*) c FROM patients WHERE coordinator=? AND stage<4', u.id) as any).c;
   if (assigned) return res.status(400).json({ error: `${u.name} is the coordinator on ${assigned} active case${assigned === 1 ? '' : 's'} — reassign them first, then delete` });
-  db.prepare('UPDATE patients SET coordinator=NULL WHERE coordinator=?').run(u.id);
-  db.prepare('DELETE FROM widget_prefs WHERE userId=?').run(u.id);
-  db.prepare('DELETE FROM users WHERE id=?').run(u.id);
-  audit(req.user!, 'admin.user.delete', 'user', u.id, `${u.name} <${u.email}> permanently deleted`);
+  await q.run('UPDATE patients SET coordinator=NULL WHERE coordinator=?', u.id);
+  await q.run('DELETE FROM widget_prefs WHERE userId=?', u.id);
+  await q.run('DELETE FROM users WHERE id=?', u.id);
+  await audit(req.user!, 'admin.user.delete', 'user', u.id, `${u.name} <${u.email}> permanently deleted`);
   res.json({ ok: true });
 });
 
 /* ================= admin: audit & data ================= */
-api.get('/admin/audit', requireAdmin, (_req, res) =>
-  res.json(db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 500').all()));
+api.get('/admin/audit', requireAdmin, async (req, res) =>
+  res.json(await q.all('SELECT * FROM audit_log ORDER BY id DESC LIMIT 500')));
 
-api.get('/admin/export', requireAdmin, (_req, res) => {
+api.get('/admin/export', requireAdmin, async (req, res) => {
   const dump: any = {};
   for (const t of ['users', 'counters', 'insurers', 'adjusters', 'ins_contracts', 'providers', 'branches', 'patients', 'outside_bills', 'notes', 'tasks', 'task_comments', 'prov_links', 'bills', 'receipts', 'sent_docs', 'documents', 'files', 'ai_requests', 'widget_prefs', 'crm_targets', 'crm_contacts', 'crm_activities'])
-    dump[t] = db.prepare(`SELECT * FROM ${t}`).all();
+    dump[t] = await q.all(`SELECT * FROM ${t}`);
   // Never export credentials: password hashes and TOTP secrets stay in the database.
   dump.users = dump.users.map(({ pwHash, totpSecret, ...u }: any) => u);
   res.setHeader('Content-Disposition', `attachment; filename="trilogy-export-${new Date().toISOString().slice(0, 10)}.json"`);
@@ -2061,40 +2010,40 @@ api.get('/admin/export', requireAdmin, (_req, res) => {
 /* ================= admin: integrations (the API layer's control panel) =================
    Status of each external service, masked view of stored keys, and write-only key entry.
    Secrets are NEVER returned in full — masked last-4 only. Env vars of the same name win. */
-api.get('/admin/integrations', requireAdmin, (_req, res) =>
-  res.json({ services: integrationStatus(), secrets: secretsMasked() }));
+api.get('/admin/integrations', requireAdmin, async (req, res) =>
+  res.json({ services: await integrationStatus(), secrets: await secretsMasked() }));
 
-api.post('/admin/secrets', requireAdmin, (req, res) => {
+api.post('/admin/secrets', requireAdmin, async (req, res) => {
   const entries = Object.entries((req.body || {}) as Record<string, string>)
     .filter(([k, v]) => (SECRET_KEYS as readonly string[]).includes(k) && typeof v === 'string' && v.trim());
   if (!entries.length) return res.status(400).json({ error: 'Nothing to save' });
-  for (const [k, v] of entries) setSecret(k, v.trim(), req.user!.name);
+  for (const [k, v] of entries) await setSecret(k, v.trim(), req.user!.name);
   // Audit the keys touched, never the values.
-  audit(req.user!, 'admin.secrets.set', undefined, undefined, entries.map(([k]) => k).join(', '));
-  res.json({ services: integrationStatus(), secrets: secretsMasked() });
+  await audit(req.user!, 'admin.secrets.set', undefined, undefined, entries.map(([k]) => k).join(', '));
+  res.json({ services: await integrationStatus(), secrets: await secretsMasked() });
 });
 
 /* SES go-live tools — domain DNS records, verification status, sandbox address verify, test send. */
 api.post('/admin/integrations/ses/domain', requireAdmin, async (req, res) => {
-  if (!emailReady()) return res.status(503).json({ error: 'Save the AWS keys and SES_FROM first' });
+  if (!await emailReady()) return res.status(503).json({ error: 'Save the AWS keys and SES_FROM first' });
   try {
     const r = await sesSetupDomain();
-    audit(req.user!, 'admin.ses.domainSetup', undefined, undefined, r.domain);
+    await audit(req.user!, 'admin.ses.domainSetup', undefined, undefined, r.domain);
     res.json(r);
   } catch (err: any) { res.status(502).json({ error: 'AWS said: ' + String(err?.message || err).slice(0, 200) }); }
 });
 api.get('/admin/integrations/ses/status', requireAdmin, async (_req, res) => {
-  if (!emailReady()) return res.status(503).json({ error: 'Save the AWS keys and SES_FROM first' });
+  if (!await emailReady()) return res.status(503).json({ error: 'Save the AWS keys and SES_FROM first' });
   try { res.json(await sesStatus()); }
   catch (err: any) { res.status(502).json({ error: 'AWS said: ' + String(err?.message || err).slice(0, 200) }); }
 });
 api.post('/admin/integrations/ses/verify-address', requireAdmin, async (req, res) => {
   const email = String(req.body?.email || '').trim();
   if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Valid email required' });
-  if (!emailReady()) return res.status(503).json({ error: 'Save the AWS keys and SES_FROM first' });
+  if (!await emailReady()) return res.status(503).json({ error: 'Save the AWS keys and SES_FROM first' });
   try {
     await sesVerifyAddress(email);
-    audit(req.user!, 'admin.ses.verifyAddress', undefined, undefined, email);
+    await audit(req.user!, 'admin.ses.verifyAddress', undefined, undefined, email);
     res.json({ ok: true, message: `AWS is emailing ${email} a verification link — click it, then test sends can deliver there even in sandbox mode.` });
   } catch (err: any) { res.status(502).json({ error: 'AWS said: ' + String(err?.message || err).slice(0, 200) }); }
 });
@@ -2107,8 +2056,8 @@ api.post('/admin/integrations/ses/test', requireAdmin, async (req, res) => {
     meta: { kind: 'test', by: req.user!.id },
     replyTo: (req.user as any)?.email || null,
   });
-  const row = db.prepare('SELECT status, detail FROM outbox WHERE id=?').get(r.outboxId) as any;
-  audit(req.user!, 'admin.ses.testEmail', undefined, undefined, `${to} — ${row?.status}`);
+  const row = await q.get('SELECT status, detail FROM outbox WHERE id=?', r.outboxId) as any;
+  await audit(req.user!, 'admin.ses.testEmail', undefined, undefined, `${to} — ${row?.status}`);
   res.json({ sent: r.sent, status: row?.status, detail: row?.detail || null });
 });
 
@@ -2116,18 +2065,18 @@ api.post('/admin/integrations/ses/test', requireAdmin, async (req, res) => {
 api.post('/admin/integrations/fax/poll', requireAdmin, async (req, res) => {
   const r = await pollInboundFaxes();
   if (!r) return res.status(503).json({ error: 'Fax polling failed or Faxage keys are missing — see the audit log for the reason' });
-  audit(req.user!, 'admin.fax.poll', undefined, undefined, `${r.imported} imported`);
+  await audit(req.user!, 'admin.fax.poll', undefined, undefined, `${r.imported} imported`);
   res.json({ ok: true, imported: r.imported, message: r.imported ? `${r.imported} new fax${r.imported === 1 ? '' : 'es'} added to the Requests queue` : 'No new faxes waiting' });
 });
 
 /* Outbox: what tried to send. Queued = waiting on credentials; failed = live but the vendor errored. */
-api.get('/admin/outbox', requireAdmin, (_req, res) =>
-  res.json(db.prepare('SELECT id,kind,toAddr,subject,substr(body,1,400) body,patientId,status,detail,createdAt,sentAt FROM outbox ORDER BY id DESC LIMIT 200').all()));
+api.get('/admin/outbox', requireAdmin, async (req, res) =>
+  res.json(await q.all('SELECT id,kind,toAddr,subject,substr(body,1,400) body,patientId,status,detail,createdAt,sentAt FROM outbox ORDER BY id DESC LIMIT 200', )));
 
 /* ================= bill OCR — reads an uploaded bill into CPT lines ================= */
 api.post('/bills/parse', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Attach the bill to read' });
-  if (!ocrReady()) return res.status(503).json({ error: 'Bill reading needs the AWS keys — an admin can add them under Admin → Integrations' });
+  if (!await ocrReady()) return res.status(503).json({ error: 'Bill reading needs the AWS keys — an admin can add them under Admin → Integrations' });
   try {
     const parsed = await parseBillFile(fs.readFileSync(req.file.path), req.file.mimetype);
     fs.unlinkSync(req.file.path);   // parse-only upload; the real file goes in with the bill itself
@@ -2144,11 +2093,10 @@ api.post('/bills/parse', upload.single('file'), async (req, res) => {
   }
 });
 
-api.post('/admin/wipe-demo', requireAdmin, (req, res) => {
+api.post('/admin/wipe-demo', requireAdmin, async (req, res) => {
   // audit_log deliberately NOT wiped — the audit trail survives data resets.
   const tables = ['notes', 'task_comments', 'tasks', 'outside_bills', 'prov_links', 'bills', 'receipts', 'sent_docs', 'documents', 'files', 'patients', 'branches', 'providers', 'ins_contracts', 'adjusters', 'insurers', 'ai_requests'];
-  const wipe = db.transaction(() => { for (const t of tables) db.prepare(`DELETE FROM ${t}`).run(); });
-  wipe();
-  audit(req.user!, 'admin.wipeDemo');
+  await tx(async () => { for (const t of tables) await q.run(`DELETE FROM ${t}`); });
+  await audit(req.user!, 'admin.wipeDemo');
   res.json({ ok: true });
 });
