@@ -143,7 +143,13 @@ function translateInsert(sql: string): string {
     );
   }
   if (/^\s*INSERT\s+OR\s+IGNORE\s+INTO/i.test(sql)) {
-    return sql.replace(/^(\s*)INSERT\s+OR\s+IGNORE\s+INTO/i, '$1INSERT INTO') + ' ON CONFLICT DO NOTHING';
+    const base = sql.replace(/^(\s*)INSERT\s+OR\s+IGNORE\s+INTO/i, '$1INSERT INTO');
+    // ON CONFLICT must precede RETURNING (run() appends `RETURNING id` for
+    // identity tables BEFORE translation). On conflict, RETURNING yields no
+    // row, so lastInsertRowid is 0 and changes is 0 — matching better-sqlite3.
+    const ret = /\bRETURNING\b/i.exec(base);
+    if (ret) return `${base.slice(0, ret.index)}ON CONFLICT DO NOTHING ${base.slice(ret.index)}`;
+    return base + ' ON CONFLICT DO NOTHING';
   }
   return sql;
 }

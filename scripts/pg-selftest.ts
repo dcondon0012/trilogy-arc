@@ -76,6 +76,9 @@ function offlineChecks(): void {
   eq('INSERT OR IGNORE becomes ON CONFLICT DO NOTHING',
     translate('INSERT OR IGNORE INTO counters(k,v) VALUES(?,?)'),
     'INSERT INTO counters(k,v) VALUES($1,$2) ON CONFLICT DO NOTHING');
+  eq('INSERT OR IGNORE keeps ON CONFLICT before RETURNING',
+    translate('INSERT OR IGNORE INTO state_minimums(state) VALUES(?) RETURNING id'),
+    'INSERT INTO state_minimums(state) VALUES($1) ON CONFLICT DO NOTHING RETURNING id');
   let threw = false;
   try { translate('INSERT OR REPLACE INTO geo_cache(k) VALUES(?)'); } catch { threw = true; }
   check('INSERT OR REPLACE throws rather than guessing', threw);
@@ -169,6 +172,18 @@ async function liveChecks(): Promise<void> {
   try { await q.run("INSERT INTO users(id,name,email,pwHash,role) VALUES(?,?,?,?,?)", 'u-bad', 'B', 'b@x.com', 'x', 'wizard'); }
   catch { rejected = true; }
   check('role CHECK constraint rejects unknown roles', rejected);
+
+  // INSERT OR IGNORE into an identity table — the db.ts:199 seed pattern.
+  // run() appends RETURNING id, translate() must slot ON CONFLICT before it.
+  const ig1 = await q.run('INSERT OR IGNORE INTO state_minimums(state,coverageType,amount,note) VALUES(?,?,?,?)',
+    'Selftest', 'PIP', 15000, 'selftest');
+  check('INSERT OR IGNORE on identity table inserts', ig1.changes === 1 && ig1.lastInsertRowid > 0,
+    `got changes=${ig1.changes}, id=${ig1.lastInsertRowid}`);
+  const ig2 = await q.run('INSERT OR IGNORE INTO state_minimums(state,coverageType,amount,note) VALUES(?,?,?,?)',
+    'Selftest', 'PIP', 99999, 'conflict');
+  check('INSERT OR IGNORE on identity table ignores conflicts', ig2.changes === 0 && ig2.lastInsertRowid === 0,
+    `got changes=${ig2.changes}, id=${ig2.lastInsertRowid}`);
+  await q.run('DELETE FROM state_minimums WHERE state=?', 'Selftest');
 
   // Stage 4 groundwork.
   const locked = await withAdvisoryLock(918273, async () => 'ran');
