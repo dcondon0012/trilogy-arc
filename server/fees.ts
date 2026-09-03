@@ -18,6 +18,7 @@
 import { Router } from 'express';
 import AdmZip from 'adm-zip';
 import { q, tx, audit, nowMST } from './db.js';
+import { withAdvisoryLock } from './pgdb.js';
 import { requireAdmin, requireFees } from './auth.js';
 
 const PFS_API = 'https://pfs.data.cms.gov/api/1';
@@ -343,10 +344,15 @@ export function scheduleFeeRefresh() {
   if (process.env.NODE_ENV !== 'production' || process.env.TRILOGY_FEES_NO_AUTO === '1') return;
   const staleDays = 7;
   const check = async () => {
-    const last = await getMeta('lastOkAt');
-    if (last && Date.now() - new Date(last).getTime() < staleDays * 86400000) return;
-    refreshFees('scheduler').then(r => console.log('[fees] scheduled refresh:', r.ok ? 'ok' : 'FAILED', '—', r.detail))
-      .catch(e => console.log('[fees] scheduled refresh crashed:', e));
+    // Stage 4: advisory lock ensures only one node runs this scheduler, even when multiple
+    // ECS tasks are running. Lock key 1001 = fee refresh.
+    const result = await withAdvisoryLock(1001, async () => {
+      const last = await getMeta('lastOkAt');
+      if (last && Date.now() - new Date(last).getTime() < staleDays * 86400000) return;
+      return refreshFees('scheduler').then(r => console.log('[fees] scheduled refresh:', r.ok ? 'ok' : 'FAILED', '—', r.detail))
+        .catch(e => console.log('[fees] scheduled refresh crashed:', e));
+    });
+    if (result === null) return; // another node has the lock
   };
   setTimeout(check, 60 * 1000);               // shortly after boot if stale
   setInterval(check, 6 * 60 * 60 * 1000);     // then every 6h (only acts when >7d old)

@@ -319,6 +319,9 @@ CREATE TABLE IF NOT EXISTS fee_zips(
   refreshId INTEGER, zip TEXT NOT NULL, state TEXT NOT NULL, carrier TEXT,
   locality TEXT NOT NULL, plus4 INTEGER DEFAULT 0, current INTEGER DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS rate_limits(
+  k TEXT NOT NULL, at BIGINT NOT NULL
+);
 
 CREATE INDEX IF NOT EXISTS idx_notes_pt ON notes(patientId);
 CREATE INDEX IF NOT EXISTS idx_bills_pt2 ON bills(patientId);
@@ -328,6 +331,7 @@ CREATE INDEX IF NOT EXISTS idx_crm_act_target ON crm_activities(targetId);
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, kind);
 CREATE INDEX IF NOT EXISTS idx_fee_rates_cur ON fee_rates(current, cpt, locality);
 CREATE INDEX IF NOT EXISTS idx_fee_zips_cur ON fee_zips(current, zip);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_k_at ON rate_limits(k, at);
 `;
 
 /**
@@ -345,7 +349,7 @@ export const TABLES: readonly string[] = [
   'agreements', 'campaigns', 'case_messages',
   'crm_targets', 'crm_contacts', 'crm_activities', 'crm_prospects',
   'secrets', 'outbox', 'pw_resets',
-  'geo_cache', 'route_cache', 'fax_seen',
+  'geo_cache', 'route_cache', 'fax_seen', 'rate_limits',
   'fee_meta', 'fee_codes', 'fee_refreshes', 'fee_rates', 'fee_zips',
 ];
 

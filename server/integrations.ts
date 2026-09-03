@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { q, tx, nowMST, audit, DATA_DIR } from './db.js';
+import { withAdvisoryLock } from './pgdb.js';
 import { putFile } from './storage.js';
 
 /* ---------- secrets: env wins, then the admin-entered table ---------- */
@@ -522,8 +523,10 @@ export async function pollInboundFaxes(): Promise<{ imported: number } | null> {
 }
 export function scheduleFaxPolling() {
   if (process.env.NODE_ENV !== 'production' || process.env.TRILOGY_NO_FAXPOLL === '1') return;
-  setInterval(() => { pollInboundFaxes(); }, 5 * 60 * 1000);
-  setTimeout(() => { pollInboundFaxes(); }, 60 * 1000);
+  // Stage 4: wrap in advisory lock so only one ECS task polls at a time. Lock key 1002 = fax polling.
+  const tick = () => withAdvisoryLock(1002, pollInboundFaxes);
+  setInterval(tick, 5 * 60 * 1000);
+  setTimeout(tick, 60 * 1000);
 }
 
 /* ---------- post-appointment SMS check-ins (runs dark until Twilio is live) ---------- */
@@ -543,6 +546,8 @@ export async function queueAppointmentCheckins() {
 }
 export function scheduleCheckins() {
   if (process.env.NODE_ENV !== 'production' || process.env.TRILOGY_NO_CHECKINS === '1') return;
-  setInterval(queueAppointmentCheckins, 6 * 60 * 60 * 1000);
-  setTimeout(queueAppointmentCheckins, 90 * 1000);
+  // Stage 4: wrap in advisory lock so only one ECS task sends check-ins. Lock key 1003 = checkins.
+  const tick = () => withAdvisoryLock(1003, queueAppointmentCheckins);
+  setInterval(tick, 6 * 60 * 60 * 1000);
+  setTimeout(tick, 90 * 1000);
 }

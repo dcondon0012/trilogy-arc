@@ -23,10 +23,14 @@ export const nowMST = () =>
 
 export async function nextId(kind: 'pt' | 'md' | 'ins'): Promise<string> {
   const prefix = { pt: 'PT-', md: 'MD-', ins: 'INS-' }[kind];
-  const row = await q.get<{ v: number }>('SELECT v FROM counters WHERE k=?', kind);
-  const v = (row?.v ?? { pt: 10000, md: 2000, ins: 3000 }[kind]) + 1;
-  await q.run('INSERT INTO counters(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=?', kind, v, v);
-  return prefix + v;
+  const initial = { pt: 10000, md: 2000, ins: 3000 }[kind];
+  // Atomic increment: INSERT with initial value, or UPDATE existing to v+1, return the new value.
+  // This prevents the read-then-write race that could mint duplicate IDs in multi-node deployments.
+  const row = await q.get<{ v: number }>(
+    'INSERT INTO counters(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=counters.v+1 RETURNING v',
+    kind, initial + 1
+  );
+  return prefix + row!.v;
 }
 
 export async function addNote(patientId: string, text: string, by: string, sys = true, kind?: string) {

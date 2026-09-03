@@ -1227,15 +1227,15 @@ api.post('/provlinks/:lid/action', async (req, res) => {
     if (!(amount > 0)) return res.status(400).json({ error: 'Authorization amount must be positive' });
     await q.run('UPDATE prov_links SET authAmount=authAmount+?, authCount=authCount+1, status=? WHERE id=?', amount, 'authorized', l.id);
     await addNote(l.patientId, `${kind === 'auth' ? 'Authorization' : 'Additional authorization'} sent to ${pr.name}: ${fmt$(amount)} (total ${fmt$(l.authAmount + amount)}) — status: Authorized`, req.user!.name);
-    sd(kind === 'auth' ? 'Authorization' : "Add'l Authorization");
+    await sd(kind === 'auth' ? 'Authorization' : "Add'l Authorization");
   } else if (kind === 'reqform') {
     await addNote(l.patientId, `Add'l auth request form sent to ${pr.name} (for provider to fill & return)`, req.user!.name);
-    sd("Add'l Authorization Request Form");
+    await sd("Add'l Authorization Request Form");
   } else if (kind === 'cxl') {
     if (l.status === 'finalized') return res.status(400).json({ error: 'Already finalized' });
     await q.run("UPDATE prov_links SET status='canceled' WHERE id=?", l.id);
     await addNote(l.patientId, `Cancel-authorization form sent to ${pr.name} (verifies all transactions; awaiting signature) — status: Canceled`, req.user!.name);
-    sd('Cancellation of Authorization Form');
+    await sd('Cancellation of Authorization Form');
   } else if (kind === 'cxlback') {
     if (l.status !== 'canceled') return res.status(400).json({ error: 'Send the cancel form first' });
     await q.run("UPDATE prov_links SET status='finalized' WHERE id=?", l.id);

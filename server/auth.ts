@@ -86,35 +86,39 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-/* Login rate limiting: 5 failures per email+IP per 15 minutes. */
+/* Login rate limiting: 5 failures per email+IP per 15 minutes. Stage 4: moved to
+   Postgres so it works across multiple nodes. Old entries are cleaned lazily. */
 const FAIL_WINDOW_MS = 15 * 60 * 1000;
 const MAX_FAILS = 5;
-const loginFails = new Map<string, number[]>();
-function tooManyFails(key: string): boolean {
+async function tooManyFails(key: string): Promise<boolean> {
   const now = Date.now();
-  const fails = (loginFails.get(key) || []).filter(t => now - t < FAIL_WINDOW_MS);
-  loginFails.set(key, fails);
-  return fails.length >= MAX_FAILS;
+  const cutoff = now - FAIL_WINDOW_MS;
+  const rows = await q.all<{ at: number }>('SELECT at FROM rate_limits WHERE k=? AND at>?', key, cutoff);
+  return rows.length >= MAX_FAILS;
 }
-function recordFail(key: string) {
-  loginFails.set(key, [...(loginFails.get(key) || []), Date.now()]);
+async function recordFail(key: string) {
+  const now = Date.now();
+  await q.run('INSERT INTO rate_limits(k, at) VALUES(?, ?)', key, now);
+  // Lazy cleanup: delete old entries for this key (keep the DB bounded).
+  await q.run('DELETE FROM rate_limits WHERE k=? AND at<?', key, now - FAIL_WINDOW_MS);
 }
 
 /* Step 1: email + password. Returns MFA requirement + enrollment info. */
 export async function login(req: Request, res: Response) {
   const { email, password } = req.body || {};
   const key = String(email || '').toLowerCase() + '|' + (req.ip || '?');
-  if (tooManyFails(key)) {
+  if (await tooManyFails(key)) {
     await audit(null, 'login.rateLimited', 'user', key);
     return res.status(429).json({ error: 'Too many failed attempts — wait 15 minutes and try again.' });
   }
   const u = await q.get<any>('SELECT * FROM users WHERE lower(email)=lower(?)', String(email || ''));
   if (!u || !bcrypt.compareSync(String(password || ''), u.pwHash)) {
-    recordFail(key);
+    await recordFail(key);
     await audit(null, 'login.failed', 'user', email);
     return res.status(401).json({ error: 'Invalid email or password' });
   }
-  loginFails.delete(key);
+  // On success, clear rate-limit entries for this key.
+  await q.run('DELETE FROM rate_limits WHERE k=?', key);
   if (u.active === 0) {
     await audit({ id: u.id, name: u.name }, 'login.deactivated');
     return res.status(403).json({ error: 'This account has been deactivated — contact an admin.' });
@@ -188,17 +192,18 @@ export async function changePassword(req: Request, res: Response) {
 
 /* ── self-serve password reset (email-backed; queued until SES is live) ── */
 const sha = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
-const forgotHits = new Map<string, number[]>();
 
 export async function forgotPassword(req: Request, res: Response) {
   const email = String(req.body?.email || '').trim().toLowerCase();
-  const key = (req.ip || '?');
+  const key = 'forgot|' + (req.ip || '?');
   const now = Date.now();
-  const hits = (forgotHits.get(key) || []).filter(t => now - t < 15 * 60 * 1000);
-  hits.push(now); forgotHits.set(key, hits);
+  const cutoff = now - 15 * 60 * 1000;
+  const hits = await q.all<{ at: number }>('SELECT at FROM rate_limits WHERE k=? AND at>?', key, cutoff);
+  await q.run('INSERT INTO rate_limits(k, at) VALUES(?, ?)', key, now);
+  await q.run('DELETE FROM rate_limits WHERE k=? AND at<?', key, cutoff);
   // Same response whether or not the account exists — no user enumeration; rate-limited per IP.
   const done = () => res.json({ ok: true, message: 'If that email has an account, a reset link is on its way. It expires in 30 minutes.' });
-  if (hits.length > 5 || !email) return done();
+  if (hits.length >= 5 || !email) return done();
   const u = await q.get<any>('SELECT * FROM users WHERE lower(email)=? AND active=1 AND approved=1', email);
   if (!u) return done();
   const token = crypto.randomBytes(32).toString('hex');
