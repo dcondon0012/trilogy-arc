@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { q, DATA_DIR } from './db.js';
-import { seedIfEmpty, ensureCoreUsers, flagSeedPasswords } from './seed.js';
+import { seedIfEmpty, ensureCoreUsers, ensureReferenceData, flagSeedPasswords } from './seed.js';
 import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal, forgotPassword, resetPassword } from './auth.js';
 import { scheduleCheckins, scheduleFaxPolling, reportError, installProcessErrorReporting } from './integrations.js';
 import { putFile } from './storage.js';
@@ -26,6 +26,7 @@ const SESSION_SECRET = process.env.SESSION_SECRET || fs.readFileSync(secretFile,
 
 await seedIfEmpty(process.env.TRILOGY_SEED !== 'empty');
 await ensureCoreUsers();
+await ensureReferenceData();
 if (process.env.NODE_ENV === 'production') await flagSeedPasswords();  // gate retired → no default passwords in production
 await seedFeeCodes();
 

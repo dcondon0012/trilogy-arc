@@ -34,6 +34,25 @@ export async function flagSeedPasswords() {
   await q.run("INSERT INTO counters(k,v) VALUES('mig_weakpw',1)");
 }
 
+/** Once-per-database reference data that used to live in db.ts's SQLite migration
+ *  block (removed in stage 3 — pgschema.ts owns schema now, but these rows are data,
+ *  not schema). Counter-marker guarded exactly like before, so a database migrated
+ *  from SQLite (markers copied by migrate-to-pg) is untouched, and a fresh database
+ *  gets the statutory rows the underwriting flow and /api/state-minimums rely on. */
+export async function ensureReferenceData() {
+  if (!(await q.get("SELECT 1 FROM counters WHERE k='mig_statemin'"))) {
+    await q.run("INSERT OR IGNORE INTO state_minimums(state,coverageType,amount,note) VALUES('Oregon','PIP',15000,'Statutory PIP minimum')");
+    await q.run("INSERT OR IGNORE INTO state_minimums(state,coverageType,amount,note) VALUES('Texas','PIP',2500,'TX PIP minimum when carried — verify per policy')");
+    await q.run("INSERT INTO counters(k,v) VALUES('mig_statemin',1)");
+  }
+  // Conservative-care flags on the demo providers (feeds engines.ts scoring).
+  // One-time so an operator clearing the flag later isn't re-flagged at boot.
+  if (!(await q.get("SELECT 1 FROM counters WHERE k='mig_conserv'"))) {
+    await q.run("UPDATE providers SET conservative=1 WHERE id IN ('MD-2007','MD-2021')");
+    await q.run("INSERT INTO counters(k,v) VALUES('mig_conserv',1)");
+  }
+}
+
 export async function seedIfEmpty(withDemo = true) {
   const row = await q.get<any>('SELECT COUNT(*) c FROM users');
   const hasUsers = row.c > 0;
