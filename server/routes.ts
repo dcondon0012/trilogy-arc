@@ -212,11 +212,11 @@ api.post('/rates/:kind(carrier|provider)/:id', requireAdmin, async (req, res) =>
   const t = kind === 'carrier' ? 'carrier_rates' : 'provider_rates';
   const col = kind === 'carrier' ? 'insurerId' : 'providerId';
   const val = kind === 'carrier' ? 'price' : 'payout';
-  await tx(async () => {
+  await tx(async c => {
     for (const r of rows) if (r.cpt && r.amount > 0)
-      await q.run(`INSERT INTO ${t}(${col},cpt,${val}) VALUES(?,?,?) ON CONFLICT(${col},cpt) DO UPDATE SET ${val}=excluded.${val}`, req.params.id, String(r.cpt).trim(), r.amount);
+      await c.run(`INSERT INTO ${t}(${col},cpt,${val}) VALUES(?,?,?) ON CONFLICT(${col},cpt) DO UPDATE SET ${val}=excluded.${val}`, req.params.id, String(r.cpt).trim(), r.amount);
   });
-  
+
   await audit(req.user!, `rates.${kind}.set`, kind, req.params.id, rows.length + ' rows');
   res.json(await q.all(`SELECT * FROM ${t} WHERE ${col}=? ORDER BY cpt`, req.params.id));
 });
@@ -509,7 +509,7 @@ api.get('/deck', async (req, res) => {
   }
 
   // 10 · One-time agreements to chase (draft/sent)
-  for (const a of await q.all(`SELECT a.*, p.name ptName FROM agreements a JOIN patients p ON p.id=a.patientId
+  for (const a of await q.all(`SELECT a.*, p.name "ptName" FROM agreements a JOIN patients p ON p.id=a.patientId
     WHERE a.status IN ('draft','sent')`, ) as any[]) {
     if (!pidSet.has(a.patientId)) continue;
     cards.push({
@@ -531,7 +531,7 @@ api.get('/deck', async (req, res) => {
   // 11 · Recurring gap → worth a full contract (growth escalation, admin)
   if (req.user!.role === 'admin') {
     for (const g of await q.all(`SELECT providerName, COUNT(*) c, SUM(amount) amt FROM agreements
-      GROUP BY providerName HAVING c>=2`, ) as any[]) {
+      GROUP BY providerName HAVING COUNT(*)>=2`, ) as any[]) {
       const already = await q.get('SELECT 1 FROM crm_targets WHERE lower(name)=lower(?)', g.providerName)
         || await q.get('SELECT 1 FROM campaigns WHERE name=?', g.providerName);
       if (already) continue;
@@ -731,7 +731,7 @@ api.post('/bills/:bid/eob', async (req, res) => {
 
 /* One-time agreements. */
 api.get('/agreements', async (_req, res) => {
-  res.json(await q.all(`SELECT a.*, p.name ptName FROM agreements a JOIN patients p ON p.id=a.patientId ORDER BY a.id DESC`));
+  res.json(await q.all(`SELECT a.*, p.name "ptName" FROM agreements a JOIN patients p ON p.id=a.patientId ORDER BY a.id DESC`));
 });
 api.post('/agreements', async (req, res) => {
   const v = req.body || {};
@@ -780,12 +780,13 @@ api.post('/outbound/send', async (req, res) => {
 api.get('/schedule', async (_req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const horizon = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
-  const upcoming = await q.all(`SELECT a.*, p.name ptName, pr.name prName FROM appointments a
+  const upcoming = await q.all(`SELECT a.*, p.name "ptName", pr.name "prName" FROM appointments a
     JOIN patients p ON p.id=a.patientId LEFT JOIN providers pr ON pr.id=a.providerId
     WHERE a.whenAt>=? AND a.whenAt<=? ORDER BY a.whenAt`, today, horizon);
-  const gaps = await Promise.all((await q.all(`SELECT p.* FROM patients p WHERE p.stage=2`) as any[])
-    .filter(async p => !await q.get('SELECT 1 FROM appointments WHERE patientId=? AND whenAt>=?', p.id, today))
-    .map(async p => ({ id: p.id, name: p.name, caseType: p.caseType, coordinator: p.coordinator })));
+  // NOT EXISTS in SQL — .filter(async …) returns Promises, which are always truthy.
+  const gaps = (await q.all(`SELECT p.id, p.name, p.caseType, p.coordinator FROM patients p WHERE p.stage=2
+    AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.patientId=p.id AND a.whenAt>=?)`, today) as any[])
+    .map(p => ({ id: p.id, name: p.name, caseType: p.caseType, coordinator: p.coordinator }));
   res.json({ upcoming, gaps });
 });
 api.post('/patients/:id/appointments', async (req, res) => {
@@ -801,12 +802,13 @@ api.post('/patients/:id/appointments', async (req, res) => {
 api.get('/growth', requireAdmin, async (req, res) => {
   const d30 = new Date(Date.now() - 30 * 86400000).toISOString();
   const d30d = d30.slice(0, 10);
-  const coldCarriers = await Promise.all((await q.all('SELECT id,name FROM insurers') as any[])
-    .filter(async c => !(await q.get('SELECT 1 FROM patients WHERE insurerId=? AND createdAt>=?', c.id, d30)))
-    .map(async c => ({ ...c, why: 'No new referrals in 30 days' })));
-  const coldProviders = await Promise.all((await q.all('SELECT id,name,type FROM providers') as any[])
-    .filter(async pr => !(await q.get('SELECT 1 FROM bills WHERE providerId=? AND dos>=? AND voided=0', pr.id, d30d)))
-    .map(async pr => ({ ...pr, why: 'No bills in 30 days — relationship cooling' })));
+  // NOT EXISTS in SQL — .filter(async …) returns Promises, which are always truthy.
+  const coldCarriers = (await q.all(`SELECT id,name FROM insurers i
+    WHERE NOT EXISTS (SELECT 1 FROM patients p WHERE p.insurerId=i.id AND p.createdAt>=?)`, d30) as any[])
+    .map(c => ({ ...c, why: 'No new referrals in 30 days' }));
+  const coldProviders = (await q.all(`SELECT id,name,type FROM providers pr
+    WHERE NOT EXISTS (SELECT 1 FROM bills b WHERE b.providerId=pr.id AND b.dos>=? AND b.voided=0)`, d30d) as any[])
+    .map(pr => ({ ...pr, why: 'No bills in 30 days — relationship cooling' }));
   const gaps = await q.all(`SELECT providerName, COUNT(*) c, SUM(amount) amt FROM agreements GROUP BY providerName ORDER BY c DESC`, );
   const campaigns = await q.all('SELECT * FROM campaigns ORDER BY id DESC');
   const queue = [
@@ -1381,7 +1383,7 @@ api.post('/bills/:bid/void', async (req, res) => {
   const reason = String(req.body?.reason || '').trim();
   if (!reason) return res.status(400).json({ error: 'A reason is required to void' });
   await q.run('UPDATE bills SET voided=1, voidReason=? WHERE id=?', reason, b.id);
-  await q.run('UPDATE prov_links SET billed=MAX(0,billed-?) WHERE patientId=? AND providerId=?', b.billed, b.patientId, b.providerId);
+  await q.run('UPDATE prov_links SET billed=GREATEST(0,billed-?) WHERE patientId=? AND providerId=?', b.billed, b.patientId, b.providerId);
   await q.run('DELETE FROM receipt_bills WHERE billId=?', b.id);
   const pr = await q.get('SELECT name FROM providers WHERE id=?', b.providerId) as any;
   await addNote(b.patientId, `Bill VOIDED: ${pr?.name} · DOS ${fmtDate(b.dos)} · ${fmt$(b.billed)} — reason: ${reason}` +
@@ -1414,11 +1416,11 @@ api.post('/receipts/:rid/link', async (req, res) => {
     const b = await q.get('SELECT patientId FROM bills WHERE id=?', bid) as any;
     if (!b || b.patientId !== r.patientId) return res.status(400).json({ error: 'Bill ' + bid + ' does not belong to this patient' });
   }
-  await tx(async () => {
-    await q.run('DELETE FROM receipt_bills WHERE receiptId=?', r.id);
-    for (const bid of billIds) await q.run('INSERT INTO receipt_bills(receiptId,billId) VALUES(?,?)', r.id, bid);
+  await tx(async c => {
+    await c.run('DELETE FROM receipt_bills WHERE receiptId=?', r.id);
+    for (const bid of billIds) await c.run('INSERT INTO receipt_bills(receiptId,billId) VALUES(?,?)', r.id, bid);
   });
-  
+
   await addNote(r.patientId, `Receipt ${fmt$(r.amount)} (${r.ref || ''}) reconciled to ${billIds.length} bill${billIds.length === 1 ? '' : 's'}`, req.user!.name);
   await audit(req.user!, 'receipt.link', 'receipt', String(r.id), billIds.join(','));
   await sendPatient(req, res, r.patientId);
@@ -2096,7 +2098,7 @@ api.post('/bills/parse', upload.single('file'), async (req, res) => {
 api.post('/admin/wipe-demo', requireAdmin, async (req, res) => {
   // audit_log deliberately NOT wiped — the audit trail survives data resets.
   const tables = ['notes', 'task_comments', 'tasks', 'outside_bills', 'prov_links', 'bills', 'receipts', 'sent_docs', 'documents', 'files', 'patients', 'branches', 'providers', 'ins_contracts', 'adjusters', 'insurers', 'ai_requests'];
-  await tx(async () => { for (const t of tables) await q.run(`DELETE FROM ${t}`); });
+  await tx(async c => { for (const t of tables) await c.run(`DELETE FROM ${t}`); });
   await audit(req.user!, 'admin.wipeDemo');
   res.json({ ok: true });
 });

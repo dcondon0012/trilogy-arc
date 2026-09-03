@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { q, DATA_DIR } from './db.js';
+import { applySchema } from './pgdb.js';
 import { seedIfEmpty, ensureCoreUsers, ensureReferenceData, flagSeedPasswords } from './seed.js';
 import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal, forgotPassword, resetPassword } from './auth.js';
 import { scheduleCheckins, scheduleFaxPolling, reportError, installProcessErrorReporting } from './integrations.js';
@@ -24,6 +25,9 @@ const secretFile = path.join(DATA_DIR, '.session-secret');
 if (!fs.existsSync(secretFile)) fs.writeFileSync(secretFile, crypto.randomBytes(32).toString('hex'));
 const SESSION_SECRET = process.env.SESSION_SECRET || fs.readFileSync(secretFile, 'utf8');
 
+// On SQLite the schema was created as a side effect of importing db.ts; on Postgres
+// nothing else creates it — apply the (idempotent) schema before any seed touches a table.
+await applySchema();
 await seedIfEmpty(process.env.TRILOGY_SEED !== 'empty');
 await ensureCoreUsers();
 await ensureReferenceData();
@@ -136,6 +140,25 @@ if (fs.existsSync(dist)) {
     res.sendFile(path.join(dist, 'index.html'));
   });
 }
+
+/* Express 4 never forwards a REJECTED async handler to the error middleware — before the
+   async conversion a thrown DB error became a 500 via the sync throw path; now it would
+   leave the request hanging until the client times out. Wrap every registered handler
+   (arity ≤ 3; error middleware keeps its 4-arg signature) so rejections hit next(err). */
+function asyncSafe(stack: any[]) {
+  for (const layer of stack) {
+    if (layer.route) { asyncSafe(layer.route.stack); continue; }
+    if (layer.handle?.stack) { asyncSafe(layer.handle.stack); continue; }
+    if (typeof layer.handle === 'function' && layer.handle.length <= 3) {
+      const h = layer.handle;
+      layer.handle = (req: any, res: any, next: any) => {
+        try { return Promise.resolve(h(req, res, next)).catch(next); }
+        catch (err) { next(err); }
+      };
+    }
+  }
+}
+asyncSafe((app as any)._router.stack);
 
 app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);

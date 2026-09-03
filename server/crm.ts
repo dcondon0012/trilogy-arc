@@ -48,7 +48,7 @@ async function networkSignals() {
     if (!(await q.get<any>('SELECT 1 FROM bills WHERE providerId=? AND dos>=? AND voided=0', p.id, d30d)))
       coldProviders.push({ kind: 'provider', refId: p.id, name: p.name, why: 'Network provider — no bills in 30 days, relationship cooling' });
   }
-  const gaps = (await q.all<any>('SELECT providerName, COUNT(*) c, SUM(amount) amt FROM agreements GROUP BY providerName HAVING c>=2'))
+  const gaps = (await q.all<any>('SELECT providerName, COUNT(*) c, SUM(amount) amt FROM agreements GROUP BY providerName HAVING COUNT(*)>=2'))
     .map(g => ({ kind: 'gap', refId: null, name: g.providerName, why: `${g.c} one-time agreements ($${Math.round(g.amt || 0).toLocaleString()}) — contract candidate` }));
   return { coldCarriers, coldProviders, gaps };
 }
@@ -259,7 +259,7 @@ crm.post('/prospects/search', async (req, res) => {
   const market = String(req.body?.market || '').trim();
   const specialty = String(req.body?.specialty || '').trim();
   if (!market || !specialty) return res.status(400).json({ error: 'Market and specialty are both required — e.g. "Springfield, MO" + "Chiropractic"' });
-  if (!placesReady()) return res.status(503).json({ error: 'Auto-search needs the Google Places key — an admin can add it under Admin → Integrations' });
+  if (!await placesReady()) return res.status(503).json({ error: 'Auto-search needs the Google Places key — an admin can add it under Admin → Integrations' });
   let hits;
   try { hits = await searchPlaces(`${specialty} in ${market}`); }
   catch (err: any) { return res.status(502).json({ error: 'Google Places said: ' + String(err?.message || err).slice(0, 160) }); }
