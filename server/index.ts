@@ -4,7 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { db, DATA_DIR } from './db.js';
+import { q, DATA_DIR } from './db.js';
 import { seedIfEmpty, ensureCoreUsers, flagSeedPasswords } from './seed.js';
 import { login, mfa, logout, requireAuth, currentUser, changePassword, registerPortal, forgotPassword, resetPassword } from './auth.js';
 import { scheduleCheckins, scheduleFaxPolling, reportError, installProcessErrorReporting } from './integrations.js';
@@ -24,10 +24,10 @@ const secretFile = path.join(DATA_DIR, '.session-secret');
 if (!fs.existsSync(secretFile)) fs.writeFileSync(secretFile, crypto.randomBytes(32).toString('hex'));
 const SESSION_SECRET = process.env.SESSION_SECRET || fs.readFileSync(secretFile, 'utf8');
 
-seedIfEmpty(process.env.TRILOGY_SEED !== 'empty');
-ensureCoreUsers();
-if (process.env.NODE_ENV === 'production') flagSeedPasswords();  // gate retired → no default passwords in production
-seedFeeCodes();
+await seedIfEmpty(process.env.TRILOGY_SEED !== 'empty');
+await ensureCoreUsers();
+if (process.env.NODE_ENV === 'production') await flagSeedPasswords();  // gate retired → no default passwords in production
+await seedFeeCodes();
 
 // Deploy verification stamp: the current git commit, readable pre-gate at /api/health.
 let BUILD = 'unknown';
@@ -66,10 +66,10 @@ app.use(cookieSession({
 /* Pre-gate health check: no data, just liveness + which commit is running.
    Lets deploys be verified from outside without a gate session. The fee block
    is pipeline metadata only (status/date/counts of public Medicare data). */
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', async (_req, res) => {
   let fees: any = null;
   try {
-    const r = db.prepare('SELECT at, status, year, zips, codes, localities, detail FROM fee_refreshes ORDER BY id DESC LIMIT 1').get() as any;
+    const r = await q.get<any>('SELECT at, status, year, zips, codes, localities, detail FROM fee_refreshes ORDER BY id DESC LIMIT 1');
     if (r) fees = { status: r.status, at: r.at, year: r.year, codes: r.codes, localities: r.localities, zips: r.zips, detail: r.detail };
   } catch { /* table absent on first boot */ }
   res.json({ ok: true, build: BUILD, fees });
@@ -82,17 +82,17 @@ app.post('/api/auth/logout', requireAuth, logout);
 app.post('/api/auth/change-password', requireAuth, changePassword);
 app.post('/api/auth/forgot-password', forgotPassword);   // pre-auth by design: emails a 30-min reset link, never reveals whether the address exists
 app.post('/api/auth/reset-password', resetPassword);
-app.get('/api/auth/me', (req, res) => {
+app.get('/api/auth/me', async (req, res) => {
   const u = currentUser(req);
   if (!u) return res.status(401).json({ error: 'Not signed in' });
-  const row = db.prepare('SELECT mustChangePw FROM users WHERE id=?').get(u.id) as any;
+  const row = await q.get<any>('SELECT mustChangePw FROM users WHERE id=?', u.id);
   res.json({ user: { ...u, mustChangePw: !!row?.mustChangePw } });
 });
 
 // Portal self-signup: org names only (no PHI) for the signup dropdown.
-app.get('/api/public/orgs', (_req, res) => res.json({
-  providers: db.prepare('SELECT id,name,type FROM providers ORDER BY name').all(),
-  carriers: db.prepare('SELECT id,name FROM insurers ORDER BY name').all(),
+app.get('/api/public/orgs', async (_req, res) => res.json({
+  providers: await q.all('SELECT id,name,type FROM providers ORDER BY name'),
+  carriers: await q.all('SELECT id,name FROM insurers ORDER BY name'),
 }));
 app.post('/api/auth/register-portal', registerPortal);
 
@@ -105,12 +105,12 @@ app.post('/api/hooks/:channel(email|fax)', express.json({ limit: '45mb' }), asyn
   if (!fileB64 || !fileName) return res.status(400).json({ error: 'fileB64 and fileName required' });
   const fid = crypto.randomUUID();
   await putFile(fid, Buffer.from(fileB64, 'base64'));
-  db.prepare('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)')
-    .run(fid, fileName, mime || 'application/pdf', Buffer.byteLength(fileB64, 'base64'), 'inbound-' + req.params.channel, nowMST());
-  db.prepare(`INSERT INTO intake_items(channel,kind,status,fileId,fileName,fromInfo,note,receivedAt)
-    VALUES(?,?,'triage',?,?,?,?,?)`)
-    .run(req.params.channel, 'bill', fid, fileName, fromInfo || 'unknown sender', note || null, nowMST());
-  audit(null, 'inbound.' + req.params.channel, undefined, undefined, fileName);
+  await q.run('INSERT INTO files(id,name,mime,size,uploadedBy,time) VALUES(?,?,?,?,?,?)',
+    fid, fileName, mime || 'application/pdf', Buffer.byteLength(fileB64, 'base64'), 'inbound-' + req.params.channel, nowMST());
+  await q.run(`INSERT INTO intake_items(channel,kind,status,fileId,fileName,fromInfo,note,receivedAt)
+    VALUES(?,?,'triage',?,?,?,?,?)`,
+    req.params.channel, 'bill', fid, fileName, fromInfo || 'unknown sender', note || null, nowMST());
+  await audit(null, 'inbound.' + req.params.channel, undefined, undefined, fileName);
   res.json({ ok: true });
 });
 
