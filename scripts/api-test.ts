@@ -224,6 +224,18 @@ async function main() {
   assert(r.status === 429, 'login locked after 5 failures');
   cookies = adminCk;
 
+  // MFA rate limiting: 5 wrong codes lock the user's MFA step for 15 minutes —
+  // after that even a correct code is refused while limited.
+  r = await call('POST', '/api/admin/users', { name: 'MFA Limit', email: 'mfalimit@trilogymed.com', role: 'coordinator', password: 'temppass1' });
+  assert(r.status === 200, 'mfa-limit user created');
+  cookies = [];
+  r = await call('POST', '/api/auth/login', { email: 'mfalimit@trilogymed.com', password: 'temppass1' });
+  const mfaLimitSecret = r.data.secret;
+  for (let i = 0; i < 5; i++) await call('POST', '/api/auth/mfa', { code: '000000' });
+  r = await call('POST', '/api/auth/mfa', { code: authenticator.generate(mfaLimitSecret) });
+  assert(r.status === 429, 'MFA locked after 5 wrong codes (correct code also refused)');
+  cookies = adminCk;
+
   // forced password change on first login
   r = await call('POST', '/api/admin/users', { name: 'PW Test', email: 'pwtest@trilogymed.com', role: 'coordinator', password: 'temppass1' });
   assert(r.status === 200, 'temp-password user created');

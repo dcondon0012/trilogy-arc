@@ -99,14 +99,18 @@ async function tooManyFails(key: string): Promise<boolean> {
 async function recordFail(key: string) {
   const now = Date.now();
   await q.run('INSERT INTO rate_limits(k, at) VALUES(?, ?)', key, now);
-  // Lazy cleanup: delete old entries for this key (keep the DB bounded).
-  await q.run('DELETE FROM rate_limits WHERE k=? AND at<?', key, now - FAIL_WINDOW_MS);
+  // Lazy cleanup: delete expired entries table-wide, not just this key — otherwise
+  // keys that never recur (one failed login per stray IP) accumulate forever.
+  // Safe while every limiter here uses the same 15-minute window.
+  await q.run('DELETE FROM rate_limits WHERE at<?', now - FAIL_WINDOW_MS);
 }
 
 /* Step 1: email + password. Returns MFA requirement + enrollment info. */
 export async function login(req: Request, res: Response) {
   const { email, password } = req.body || {};
-  const key = String(email || '').toLowerCase() + '|' + (req.ip || '?');
+  // 'login|' prefix namespaces the key so a crafted email can't collide with the
+  // 'forgot|' or 'mfa|' buckets in the shared rate_limits table.
+  const key = 'login|' + String(email || '').toLowerCase() + '|' + (req.ip || '?');
   if (await tooManyFails(key)) {
     await audit(null, 'login.rateLimited', 'user', key);
     return res.status(429).json({ error: 'Too many failed attempts — wait 15 minutes and try again.' });
@@ -158,14 +162,25 @@ export async function mfa(req: Request, res: Response) {
   const u = await q.get<any>('SELECT * FROM users WHERE id=?', s.pendingUserId);
   if (!u) return res.status(400).json({ error: 'Sign in first' });
 
+  // TOTP brute-force limit: 5 wrong codes per user per 15 minutes. Without this a
+  // 6-digit code is guessable online; the check sits before verification so even a
+  // correct code is refused while the account is limited.
+  const mfaKey = 'mfa|' + u.id;
+  if (await tooManyFails(mfaKey)) {
+    await audit({ id: u.id, name: u.name }, 'mfa.rateLimited');
+    return res.status(429).json({ error: 'Too many failed codes — wait 15 minutes and try again.' });
+  }
+
   const secret = u.totpSecret || s.pendingTotpSecret;
   if (!secret) return res.status(400).json({ error: 'Sign in first' });
 
   const ok = authenticator.check(String(code || ''), secret);
   if (!ok) {
+    await recordFail(mfaKey);
     await audit({ id: u.id, name: u.name }, 'mfa.failed');
     return res.status(401).json({ error: 'Invalid code — check your authenticator app' });
   }
+  await q.run('DELETE FROM rate_limits WHERE k=?', mfaKey);
   if (!u.totpSecret) {
     await q.run('UPDATE users SET totpSecret=? WHERE id=?', secret, u.id);
     await audit({ id: u.id, name: u.name }, 'mfa.enrolled');

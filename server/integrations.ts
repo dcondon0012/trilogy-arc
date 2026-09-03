@@ -524,7 +524,11 @@ export async function pollInboundFaxes(): Promise<{ imported: number } | null> {
 export function scheduleFaxPolling() {
   if (process.env.NODE_ENV !== 'production' || process.env.TRILOGY_NO_FAXPOLL === '1') return;
   // Stage 4: wrap in advisory lock so only one ECS task polls at a time. Lock key 1002 = fax polling.
-  const tick = () => withAdvisoryLock(1002, pollInboundFaxes);
+  // The .catch is load-bearing: setInterval ignores the promise, so a rejection (DB blip
+  // acquiring the lock, or audit() failing inside the poll's own catch) would otherwise be
+  // an unhandled rejection and kill the process on modern Node.
+  const tick = () => withAdvisoryLock(1002, pollInboundFaxes)
+    .catch((e: any) => console.log('[fax] poll tick failed:', e?.message || e));
   setInterval(tick, 5 * 60 * 1000);
   setTimeout(tick, 60 * 1000);
 }
@@ -547,7 +551,10 @@ export async function queueAppointmentCheckins() {
 export function scheduleCheckins() {
   if (process.env.NODE_ENV !== 'production' || process.env.TRILOGY_NO_CHECKINS === '1') return;
   // Stage 4: wrap in advisory lock so only one ECS task sends check-ins. Lock key 1003 = checkins.
-  const tick = () => withAdvisoryLock(1003, queueAppointmentCheckins);
+  // The .catch is load-bearing — same reason as the fax tick above; queueAppointmentCheckins
+  // has no internal try/catch, so a failed query would otherwise crash the process.
+  const tick = () => withAdvisoryLock(1003, queueAppointmentCheckins)
+    .catch((e: any) => console.log('[checkins] tick failed:', e?.message || e));
   setInterval(tick, 6 * 60 * 60 * 1000);
   setTimeout(tick, 90 * 1000);
 }

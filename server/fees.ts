@@ -346,13 +346,20 @@ export function scheduleFeeRefresh() {
   const check = async () => {
     // Stage 4: advisory lock ensures only one node runs this scheduler, even when multiple
     // ECS tasks are running. Lock key 1001 = fee refresh.
-    const result = await withAdvisoryLock(1001, async () => {
-      const last = await getMeta('lastOkAt');
-      if (last && Date.now() - new Date(last).getTime() < staleDays * 86400000) return;
-      return refreshFees('scheduler').then(r => console.log('[fees] scheduled refresh:', r.ok ? 'ok' : 'FAILED', '—', r.detail))
-        .catch(e => console.log('[fees] scheduled refresh crashed:', e));
-    });
-    if (result === null) return; // another node has the lock
+    // The try/catch is load-bearing: setInterval ignores the returned promise, so a
+    // rejection here (e.g. the DB briefly unreachable when acquiring the lock) would be
+    // an unhandled rejection and kill the whole process on modern Node.
+    try {
+      const result = await withAdvisoryLock(1001, async () => {
+        const last = await getMeta('lastOkAt');
+        if (last && Date.now() - new Date(last).getTime() < staleDays * 86400000) return;
+        return refreshFees('scheduler').then(r => console.log('[fees] scheduled refresh:', r.ok ? 'ok' : 'FAILED', '—', r.detail))
+          .catch(e => console.log('[fees] scheduled refresh crashed:', e));
+      });
+      if (result === null) return; // another node has the lock
+    } catch (e: any) {
+      console.log('[fees] scheduler tick failed:', e?.message || e);
+    }
   };
   setTimeout(check, 60 * 1000);               // shortly after boot if stale
   setInterval(check, 6 * 60 * 60 * 1000);     // then every 6h (only acts when >7d old)
