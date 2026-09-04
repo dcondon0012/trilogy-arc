@@ -95,8 +95,8 @@ rest — nothing reaches AWS unless the gate passes first.
    testing things is caught. No AWS credentials in this job: the suite has to
    pass without touching S3 or SES.
 2. **build** — builds `deploy/Dockerfile` and pushes to ECR tagged with the
-   short commit SHA and the environment name. The SHA is baked in as
-   `GIT_COMMIT`.
+   short commit SHA (tags are immutable, so that is the only tag; a re-run
+   reuses an already-pushed image). The SHA is baked in as `GIT_COMMIT`.
 3. **plan** — `terraform validate` + `plan`, saved as a run artifact. Read this
    before approving anything for prod.
 4. **deploy** — `terraform apply`, wait for the ECS service to stabilize, then
@@ -191,9 +191,9 @@ Rough monthly, us-west-2, before tax:
 | Fargate | ~$9 (1 × 0.25 vCPU) | ~$36 (2 × 0.5 vCPU) |
 | ALB | ~$17 | ~$17 |
 | RDS | ~$13 (t4g.micro, single-AZ) | ~$50 (t4g.small, Multi-AZ) |
-| NAT gateway | — | ~$65 (2 AZ) |
+| NAT gateway | ~$35 (one, shared) | ~$35 (one, shared) |
 | S3 + Secrets + CloudWatch + WAF | ~$5 | ~$25 |
-| **Total** | **~$40–70** | **~$300–450** |
+| **Total** | **~$75–105** | **~$250–400** |
 
 Staging can be torn down between test cycles (`terraform destroy` in the staging
 workspace) if it is not being used — the state bucket and ECR images survive, so

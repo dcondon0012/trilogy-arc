@@ -168,19 +168,25 @@ jobs:
         env:
           ENV: ${{ needs.verify.outputs.target }}
 
+      # SHA tag only. The repo enforces IMMUTABLE tags, so a moving tag like
+      # `:staging` would push once and fail every deploy after it — and a
+      # workflow re-run would fail re-pushing the same SHA. If the tag already
+      # exists, reuse it: same commit, same image.
       - id: push
         name: Build and push
         run: |
           SHA="${GITHUB_SHA:0:7}"
           URI="${{ steps.login.outputs.registry }}/$ECR_REPO"
-          docker build -f deploy/Dockerfile \
-            --build-arg "GIT_COMMIT=$SHA" \
-            -t "$URI:$SHA" -t "$URI:$ENV" .
-          docker push "$URI:$SHA"
-          docker push "$URI:$ENV"
+          if aws ecr describe-images --repository-name "$ECR_REPO" \
+               --image-ids imageTag="$SHA" >/dev/null 2>&1; then
+            echo "Image $SHA already in ECR (immutable tags) — reusing it."
+          else
+            docker build -f deploy/Dockerfile \
+              --build-arg "GIT_COMMIT=$SHA" \
+              -t "$URI:$SHA" .
+            docker push "$URI:$SHA"
+          fi
           echo "image=$URI:$SHA" >> "$GITHUB_OUTPUT"
-        env:
-          ENV: ${{ needs.verify.outputs.target }}
 
   # ───────────────────────────────────────────────────────────────────────────
   # 3. Plan. Always readable in the run log before anything is applied.
@@ -274,9 +280,16 @@ jobs:
           ALB=$(terraform output -raw alb_dns)
           EXPECTED="${GITHUB_SHA:0:7}"
           echo "Expecting build=$EXPECTED at http://$ALB/api/health"
+          # No cert → the ALB serves plain http. With a cert (prod) port 80 is
+          # a 301 and the cert won't match the ALB's own DNS name, so fall back
+          # to https with -k — the hash check, not TLS, is what's verified here.
           for i in $(seq 1 30); do
-            BODY=$(curl -fsS --max-time 10 "http://$ALB/api/health" || true)
-            GOT=$(echo "$BODY" | sed -n 's/.*"build":"\([^"]*\)".*/\1/p')
+            GOT=""
+            for SCHEME in http https; do
+              BODY=$(curl -fsSk --max-time 10 "$SCHEME://$ALB/api/health" 2>/dev/null || true)
+              GOT=$(echo "$BODY" | sed -n 's/.*"build":"\([^"]*\)".*/\1/p')
+              [ -n "$GOT" ] && break
+            done
             if [ "$GOT" = "$EXPECTED" ]; then
               echo "Deploy verified: $ALB is running $GOT"
               exit 0

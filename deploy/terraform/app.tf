@@ -178,7 +178,23 @@ resource "aws_lb_listener" "https" {
   }
 }
 
+# Without a cert (staging today) port 80 must FORWARD, not redirect: the https
+# listener doesn't exist, so a 301 to :443 points at nothing — the ALB would be
+# unreachable and deploy.yml's post-deploy health verification would fail on
+# every run. With a cert (prod, stage 6) port 80 redirects to https as usual.
+resource "aws_lb_listener" "http_forward" {
+  count             = var.certificate_arn == "" ? 1 : 0
+  load_balancer_arn = aws_lb.app.arn
+  port              = 80
+  protocol          = "HTTP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+}
+
 resource "aws_lb_listener" "http_redirect" {
+  count             = var.certificate_arn != "" ? 1 : 0
   load_balancer_arn = aws_lb.app.arn
   port              = 80
   protocol          = "HTTP"
