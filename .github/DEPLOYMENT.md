@@ -58,22 +58,11 @@ second VPC, a second RDS instance, a second everything, and have no record of
 the first set. That is a genuinely expensive mistake to unwind, so the pipeline
 refuses to start rather than risk it.
 
-### 4. Switch to OIDC
+### 4. Switch to OIDC — DONE (09/04/2026)
 
-In both workflow files, replace:
-
-```yaml
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-```
-
-with the role the setup workflow printed:
-
-```yaml
-          role-to-assume: arn:aws:iam::<account>:role/github-actions-arc
-```
-
-Push, confirm a run still works, then:
+Both workflows authenticate as `arn:aws:iam::306077570168:role/github-actions-arc`
+via GitHub's OIDC provider; no AWS keys are read from secrets anymore. What
+remains, once a post-switch run has gone green:
 
 - delete the `terraform-admin` access key (IAM → Users → terraform-admin → Security credentials)
 - delete both repo secrets

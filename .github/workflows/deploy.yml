@@ -29,7 +29,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # for the OIDC migration; harmless while using access keys
+  id-token: write   # OIDC: Actions mints a short-lived token per run; no stored AWS keys
 
 env:
   AWS_REGION: us-west-2
@@ -145,11 +145,8 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::306077570168:role/github-actions-arc
           aws-region: ${{ env.AWS_REGION }}
-          # OIDC migration: delete the two lines above and use
-          # role-to-assume: arn:aws:iam::<acct>:role/github-actions-arc
 
       - id: login
         uses: aws-actions/amazon-ecr-login@v2
@@ -198,8 +195,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::306077570168:role/github-actions-arc
           aws-region: ${{ env.AWS_REGION }}
       - uses: hashicorp/setup-terraform@v3
         with: { terraform_version: '1.9.8' }
@@ -243,8 +239,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::306077570168:role/github-actions-arc
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v3

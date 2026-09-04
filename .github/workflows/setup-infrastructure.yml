@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # OIDC — this workflow now authenticates via the role it created
 
 env:
   AWS_REGION: us-west-2
@@ -42,8 +43,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::306077570168:role/github-actions-arc
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Identify the account
