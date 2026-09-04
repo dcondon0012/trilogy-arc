@@ -121,6 +121,11 @@ jobs:
         env:
           PROVIDER_ARN: ${{ steps.oidc.outputs.arn }}
         run: |
+          # Two sub patterns: GitHub's OIDC sub claim now embeds immutable
+          # numeric IDs (repo:owner@id/repo@id:...), which the plain pattern
+          # never matches — found live 09/04 when every AssumeRole was denied.
+          # The ID-pinned form is also the stronger condition: numeric IDs
+          # survive renames and cannot be re-registered by a squatter.
           cat > /tmp/trust.json <<EOF
           {
             "Version": "2012-10-17",
@@ -133,7 +138,10 @@ jobs:
                   "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
                 },
                 "StringLike": {
-                  "token.actions.githubusercontent.com:sub": "repo:$GH_REPO:*"
+                  "token.actions.githubusercontent.com:sub": [
+                    "repo:$GH_REPO:*",
+                    "repo:dcondon0012@321908854/trilogy-arc@1348898879:*"
+                  ]
                 }
               }
             }]
