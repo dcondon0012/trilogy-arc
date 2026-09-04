@@ -114,7 +114,7 @@ jobs:
       # Generates a little traffic first: an idle service logs nothing, and
       # "no events" would otherwise be indistinguishable from "logging broken".
       - name: CloudWatch — group, streams, recent events, credential scan
-        if: contains(steps.tasks.outputs.list, 'logs')
+        if: always() && contains(steps.tasks.outputs.list, 'logs')
         env:
           ALB: ${{ steps.tf.outputs.alb_dns }}
         run: |
@@ -217,7 +217,7 @@ jobs:
 
       # ── S3, infrastructure level ──────────────────────────────────────────
       - name: S3 — posture and a direct round trip
-        if: contains(steps.tasks.outputs.list, 's3')
+        if: always() && contains(steps.tasks.outputs.list, 's3')
         env:
           BUCKET: ${{ steps.tf.outputs.uploads_bucket }}
         run: |
@@ -290,8 +290,9 @@ jobs:
       # S3_UPLOADS_BUCKET set, persistUploads moves the staged file to S3 and
       # unlinks the local copy, so a byte-identical readback can only have come
       # from S3.
-      - name: Full api suite against the staging ALB
-        if: contains(steps.tasks.outputs.list, 'suite')
+      - id: suite
+        name: Full api suite against the staging ALB
+        if: always() && contains(steps.tasks.outputs.list, 'suite')
         env:
           ALB: ${{ steps.tf.outputs.alb_dns }}
         run: |
@@ -363,7 +364,7 @@ jobs:
           exit 0
 
       - name: S3 — confirm the suite's uploads landed in the bucket
-        if: contains(steps.tasks.outputs.list, 's3') && contains(steps.tasks.outputs.list, 'suite')
+        if: always() && contains(steps.tasks.outputs.list, 's3') && contains(steps.tasks.outputs.list, 'suite')
         env:
           BUCKET: ${{ steps.tf.outputs.uploads_bucket }}
         run: |
@@ -382,8 +383,15 @@ jobs:
             echo
           } >> .ops/report.md
           if [ "${AFTER:-0}" -le "${BEFORE:-0}" ]; then
-            echo "- **FAIL** the suite uploaded files but no new object appeared — the app is not writing to S3" >> .ops/report.md
-            exit 1
+            # Only a real finding if the suite got as far as its upload
+            # assertions. If it died earlier, nothing was ever uploaded and
+            # this would be a false red pointing at the wrong thing.
+            if [ "${{ steps.suite.outcome }}" = "success" ]; then
+              echo "- **FAIL** the suite uploaded files but no new object appeared — the app is not writing to S3" >> .ops/report.md
+              exit 1
+            fi
+            echo "- inconclusive: the suite exited before its upload assertions (\`${{ steps.suite.outcome }}\`), so nothing was uploaded to observe" >> .ops/report.md
+            exit 0
           fi
           echo "- the suite's uploads reached S3 through the app's storage layer" >> .ops/report.md
           exit 0
@@ -397,7 +405,7 @@ jobs:
       # set-alarm-state is temporary; the next metric evaluation resets it, and
       # treat_missing_data=notBreaching means that lands back on OK by itself.
       - name: Alarms — subscription confirmed, wiring, live delivery test
-        if: contains(steps.tasks.outputs.list, 'sns')
+        if: always() && contains(steps.tasks.outputs.list, 'sns')
         run: |
           set -u
           TOPIC="arn:aws:sns:us-west-2:306077570168:arc-staging-alerts"
@@ -465,7 +473,7 @@ jobs:
       # a one-off in-VPC task with the master credential passed through a
       # container override. Metadata-only, and labelled as such.
       - name: RDS — snapshot, restore, verify, delete
-        if: contains(steps.tasks.outputs.list, 'rds-drill')
+        if: always() && contains(steps.tasks.outputs.list, 'rds-drill')
         run: |
           set -u
           SRC="arc-staging-pg"
