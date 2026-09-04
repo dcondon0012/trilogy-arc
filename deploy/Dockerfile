@@ -1,6 +1,9 @@
 # Arc platform container — used by the AWS (ECS Fargate) deployment.
 # The Lightsail box keeps running from git until cutover; this file is inert there.
-FROM node:22-slim
+# Base comes from AWS's public mirror, not Docker Hub: docker.io throttles and
+# resets GitHub's shared runners (hit on deploy #4), public.ecr.aws does not.
+# Same official image, same tags.
+FROM public.ecr.aws/docker/library/node:22-slim
 
 # curl for the container health check; ca-certificates for outbound TLS (CMS, AWS, Twilio, OSM)
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
