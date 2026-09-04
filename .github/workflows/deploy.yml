@@ -1,0 +1,316 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Arc CI/CD — replaces the Lightsail git-pull cron at cutover (state doc rule 8).
+#
+#   push to dev  → verify → build → plan → apply STAGING → verify the live commit
+#   manual run   → same, and the only way to touch PROD (stage 6 gate)
+#
+# `main` is deliberately NOT a trigger. Today main auto-deploys to the live
+# Lightsail box every 2 minutes, and prod infra is gated on stage 6; wiring main
+# to a prod apply here would turn a routine review merge into a production spend.
+# Stage 6 flips that on by adding main to the push filter.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Deploy Arc
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: staging
+        type: choice
+        options: [staging, prod]
+      confirm_prod:
+        description: 'Type APPLY-PROD to allow a prod apply (ignored for staging)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  id-token: write   # for the OIDC migration; harmless while using access keys
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REPO: trilogy-arc
+  # Rule 3's baseline. CI fails if the suite silently shrinks.
+  EXPECTED_ASSERTIONS: 313
+
+concurrency:
+  group: arc-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # 1. The gate. Same checks a worker session runs before pushing: typecheck
+  #    root + client, then the full api suite against a real Postgres 16.
+  # ───────────────────────────────────────────────────────────────────────────
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.target.outputs.env }}
+      assertions: ${{ steps.suite.outputs.count }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: arcapi
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+
+      - id: target
+        run: echo "env=${{ inputs.environment || 'staging' }}" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+
+      - name: Typecheck (root)
+        run: npx tsc --noEmit
+
+      - name: Typecheck (client)
+        run: npx tsc --noEmit
+        working-directory: client
+
+      # No AWS credentials in this job by design — the suite must pass without
+      # touching S3/SES, exactly as it does in a worker sandbox.
+      - name: Full api suite on Postgres
+        id: suite
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/arcapi
+          TRILOGY_DATA_DIR: /tmp/arc-test-data
+        run: |
+          rm -rf /tmp/arc-test-data
+          npx tsx server/index.ts > /tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:4000/api/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          if ! curl -fsS http://localhost:4000/api/health >/dev/null 2>&1; then
+            echo "::error::Server never came up."; cat /tmp/server.log; exit 1
+          fi
+          set +e
+          npx tsx scripts/api-test.ts | tee /tmp/api-test.log
+          RC=${PIPESTATUS[0]}
+          set -e
+          kill "$(cat /tmp/server.pid)" 2>/dev/null || true
+          COUNT=$(grep -c '^ok:' /tmp/api-test.log || true)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::api suite failed."; cat /tmp/server.log; exit 1
+          fi
+          if [ "$COUNT" -lt "$EXPECTED_ASSERTIONS" ]; then
+            echo "::error::Suite ran $COUNT assertions, expected >= $EXPECTED_ASSERTIONS."
+            exit 1
+          fi
+          echo "Suite green: $COUNT assertions."
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-log
+          path: /tmp/server.log
+          retention-days: 5
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 2. Build the image and push it to ECR, tagged with the commit SHA.
+  #    GIT_COMMIT is baked in so /api/health can prove which commit is serving.
+  # ───────────────────────────────────────────────────────────────────────────
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard — remote state must be configured first
+        run: |
+          if ! grep -qE '^\s*backend\s+"s3"' deploy/terraform/main.tf; then
+            echo "::error::deploy/terraform/main.tf has no active S3 backend."
+            echo "Run setup-infrastructure.yml, then uncomment the backend block."
+            echo "Applying with local state would orphan every resource it creates."
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          # OIDC migration: delete the two lines above and use
+          # role-to-assume: arn:aws:iam::<acct>:role/github-actions-arc
+
+      - id: login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # The repo is a Terraform resource, but the image has to exist before the
+      # service can reference it. Targeted apply breaks the chicken-and-egg.
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: '1.9.8' }
+
+      - name: Ensure the ECR repository exists
+        run: |
+          cd deploy/terraform
+          terraform init -input=false
+          terraform workspace select "$ENV" 2>/dev/null || terraform workspace new "$ENV"
+          terraform apply -input=false -auto-approve -target=aws_ecr_repository.arc
+        env:
+          ENV: ${{ needs.verify.outputs.target }}
+
+      # SHA tag only. The repo enforces IMMUTABLE tags, so a moving tag like
+      # `:staging` would push once and fail every deploy after it — and a
+      # workflow re-run would fail re-pushing the same SHA. If the tag already
+      # exists, reuse it: same commit, same image.
+      - id: push
+        name: Build and push
+        run: |
+          SHA="${GITHUB_SHA:0:7}"
+          URI="${{ steps.login.outputs.registry }}/$ECR_REPO"
+          if aws ecr describe-images --repository-name "$ECR_REPO" \
+               --image-ids imageTag="$SHA" >/dev/null 2>&1; then
+            echo "Image $SHA already in ECR (immutable tags) — reusing it."
+          else
+            docker build -f deploy/Dockerfile \
+              --build-arg "GIT_COMMIT=$SHA" \
+              -t "$URI:$SHA" .
+            docker push "$URI:$SHA"
+          fi
+          echo "image=$URI:$SHA" >> "$GITHUB_OUTPUT"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 3. Plan. Always readable in the run log before anything is applied.
+  # ───────────────────────────────────────────────────────────────────────────
+  plan:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: '1.9.8' }
+
+      - name: Terraform plan
+        run: |
+          cd deploy/terraform
+          terraform init -input=false
+          terraform validate
+          terraform workspace select "$ENV" 2>/dev/null || terraform workspace new "$ENV"
+          terraform plan -input=false -var "image=$IMAGE" -out=tfplan
+        env:
+          ENV: ${{ needs.verify.outputs.target }}
+          IMAGE: ${{ needs.build.outputs.image }}
+
+      - name: Save plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ needs.verify.outputs.target }}
+          path: deploy/terraform/tfplan
+          retention-days: 5
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 4. Apply + deploy.
+  #    staging: approved 09/03 (state doc rule 7).
+  #    prod:    stage 6 — the `prod` GitHub Environment needs a required
+  #             reviewer, AND the dispatch input must say APPLY-PROD.
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy:
+    needs: [verify, build, plan]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.verify.outputs.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse a prod apply without explicit confirmation
+        if: needs.verify.outputs.target == 'prod' && inputs.confirm_prod != 'APPLY-PROD'
+        run: |
+          echo "::error::Prod apply requires confirm_prod=APPLY-PROD (stage 6 gate)."
+          exit 1
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: '1.9.8' }
+
+      - name: Terraform apply
+        run: |
+          cd deploy/terraform
+          terraform init -input=false
+          terraform workspace select "$ENV"
+          terraform apply -input=false -auto-approve -var "image=$IMAGE"
+        env:
+          ENV: ${{ needs.verify.outputs.target }}
+          IMAGE: ${{ needs.build.outputs.image }}
+
+      - name: Wait for the ECS rolling deploy to stabilize
+        run: |
+          SERVICE="arc-$ENV"
+          echo "Waiting for $SERVICE to reach a steady state..."
+          aws ecs wait services-stable --cluster "$SERVICE" --services "$SERVICE"
+          echo "Service stable."
+        env:
+          ENV: ${{ needs.verify.outputs.target }}
+
+      # The point of the whole pipeline (rule 8): prove THIS commit is serving.
+      # /api/health echoes the GIT_COMMIT baked into the image, so a stale task
+      # or a half-finished rollout fails here instead of going unnoticed.
+      - name: Verify the deployed commit through the ALB
+        run: |
+          cd deploy/terraform
+          terraform init -input=false >/dev/null
+          terraform workspace select "$ENV" >/dev/null
+          ALB=$(terraform output -raw alb_dns)
+          EXPECTED="${GITHUB_SHA:0:7}"
+          echo "Expecting build=$EXPECTED at http://$ALB/api/health"
+          # No cert → the ALB serves plain http. With a cert (prod) port 80 is
+          # a 301 and the cert won't match the ALB's own DNS name, so fall back
+          # to https with -k — the hash check, not TLS, is what's verified here.
+          for i in $(seq 1 30); do
+            GOT=""
+            for SCHEME in http https; do
+              BODY=$(curl -fsSk --max-time 10 "$SCHEME://$ALB/api/health" 2>/dev/null || true)
+              GOT=$(echo "$BODY" | sed -n 's/.*"build":"\([^"]*\)".*/\1/p')
+              [ -n "$GOT" ] && break
+            done
+            if [ "$GOT" = "$EXPECTED" ]; then
+              echo "Deploy verified: $ALB is running $GOT"
+              exit 0
+            fi
+            echo "  attempt $i: build=${GOT:-<no response>} — retrying in 10s"
+            sleep 10
+          done
+          echo "::error::ALB never reported build=$EXPECTED. Deploy unverified."
+          exit 1
+        env:
+          ENV: ${{ needs.verify.outputs.target }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### Arc deploy — ${{ needs.verify.outputs.target }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`${GITHUB_SHA:0:7}\` |"
+            echo "| Image | \`${{ needs.build.outputs.image }}\` |"
+            echo "| Suite | ${{ needs.verify.outputs.assertions }} assertions green |"
+            echo "| Health | verified through the ALB |"
+          } >> "$GITHUB_STEP_SUMMARY"
