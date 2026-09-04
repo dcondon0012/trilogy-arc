@@ -18,58 +18,61 @@ directory affects it.
 
 ---
 
-## Initial setup
+## Initial setup — COMPLETE (09/04/2026)
 
-Do these in order. Steps 1–3 happen once, ever.
+All four setup steps are done. Recorded here for reference.
 
-### 1. Add the AWS credentials as repo secrets
+### 1. Add the AWS credentials as repo secrets — DONE (09/04/2026)
 
-Settings → Secrets and variables → Actions → New repository secret:
+~~Settings → Secrets and variables → Actions → New repository secret~~
 
-| Secret | Value |
-|---|---|
-| `AWS_ACCESS_KEY_ID` | the `terraform-admin` key id |
-| `AWS_SECRET_ACCESS_KEY` | the `terraform-admin` secret |
+No longer needed. The workflows now use GitHub OIDC to assume
+`arn:aws:iam::306077570168:role/github-actions-arc`, so no AWS keys are stored
+anywhere. The temporary `terraform-admin` key that bootstrapped this has been
+deleted from IAM, and both `AWS_*` repo secrets have been removed.
 
-Both values are in the Claude project doc `claude/17_Arc_Ops_Access.md`. They are
-not written down here — this file is in the repo, and the repo is the thing we are
-trying not to leak credentials into.
+### 2. Run `setup-infrastructure.yml` — DONE (09/04/2026)
 
-These are temporary by design. Step 4 replaces them with a role, and then the key
-gets deleted.
+~~Actions → Setup infrastructure (one-time) → Run workflow → type `SETUP`.~~
 
-### 2. Run `setup-infrastructure.yml`
+Completed by Donny on 09/04. Created:
+- S3 state bucket: `trilogy-arc-tfstate-306077570168`
+- DynamoDB lock table: `trilogy-arc-tflock`
+- GitHub OIDC provider
+- IAM role: `github-actions-arc` (AdministratorAccess)
 
-Actions → Setup infrastructure (one-time) → Run workflow → type `SETUP`.
+The workflow is idempotent, so a re-run is harmless if needed.
 
-It creates the Terraform state bucket, the DynamoDB lock table, the GitHub OIDC
-provider, and the `github-actions-arc` IAM role. It prints exactly what to paste
-into step 3. It is idempotent, so a re-run is harmless.
+### 3. Enable the remote backend — DONE (commit 389d686, 09/04/2026)
 
-### 3. Enable the remote backend
+~~Uncomment the `backend "s3"` block in `deploy/terraform/main.tf`~~
 
-Uncomment the `backend "s3"` block in `deploy/terraform/main.tf` and fill in the
-bucket and table names the setup workflow printed. Commit and push to `dev`.
+The backend block is now active with:
+- `bucket = "trilogy-arc-tfstate-306077570168"`
+- `key = "arc/terraform.tfstate"`
+- `region = "us-west-2"`
+- `dynamodb_table = "trilogy-arc-tflock"`
 
-**This is not optional.** `deploy.yml` checks for an active backend block and
-fails the build without one. With local state, every run starts from an empty
-state file, so Terraform cannot see what it already built — it would create a
-second VPC, a second RDS instance, a second everything, and have no record of
-the first set. That is a genuinely expensive mistake to unwind, so the pipeline
-refuses to start rather than risk it.
+`deploy.yml` checks for an active backend block and fails the build without one.
+With local state, every run starts from an empty state file, so Terraform cannot
+see what it already built — it would create a second VPC, a second RDS instance,
+a second everything, and have no record of the first set. That is a genuinely
+expensive mistake to unwind, so the pipeline refuses to start rather than risk it.
 
-### 4. Switch to OIDC — DONE (09/04/2026)
+### 4. Switch to OIDC — COMPLETE (commit b41e191, 09/04/2026)
 
-Both workflows authenticate as `arn:aws:iam::306077570168:role/github-actions-arc`
-via GitHub's OIDC provider; no AWS keys are read from secrets anymore. What
-remains, once a post-switch run has gone green:
+Both workflows now authenticate as `arn:aws:iam::306077570168:role/github-actions-arc`
+via GitHub's OIDC provider. The switch included:
 
-- delete the `terraform-admin` access key (IAM → Users → terraform-admin → Security credentials)
-- delete both repo secrets
-- update `claude/17_Arc_Ops_Access.md` to say the key is gone
+- ✅ Workflows updated to use `aws-actions/configure-aws-credentials@v4` with `role-to-assume`
+- ✅ Trust policy updated to accept GitHub's immutable-ID sub claim pattern
+- ✅ First keyless deploy verified green (deploy run #7+)
+- ✅ `terraform-admin` IAM access key deleted
+- ✅ Both `AWS_*` repo secrets removed
+- ✅ `claude/17_Arc_Ops_Access.md` updated
 
-After this there are no long-lived AWS keys anywhere. Actions mints a short-lived
-token per run.
+**There are no long-lived AWS keys anywhere.** Actions mints a short-lived token
+per run (valid ~1 hour), scoped to this repo.
 
 ---
 
@@ -159,17 +162,17 @@ into the task; it is never in the image or in a workflow file.
 
 ## Stage 5 checklist
 
-- [x] Workflows written and typecheck/suite verified locally
-- [ ] AWS credentials added as repo secrets
-- [ ] `setup-infrastructure.yml` run once
-- [ ] Backend block uncommented and pushed
-- [ ] OIDC migration done, `terraform-admin` key deleted
-- [ ] First staging deploy green end to end
-- [ ] Staging ALB health check + CloudWatch logs inspected
+- [x] Workflows written and typecheck/suite verified locally (df9ef62, reviewed 0c1f3a3)
+- [x] AWS credentials added as repo secrets (Donny, 09/04 — now removed after OIDC)
+- [x] `setup-infrastructure.yml` run once (Donny, 09/04 — account 306077570168)
+- [x] Backend block uncommented and pushed (389d686)
+- [x] OIDC migration done, `terraform-admin` key deleted (b41e191)
+- [x] First staging deploy green end to end (1aa41f0, run #6)
+- [ ] Staging ALB health check + CloudWatch logs inspected (health check yes, logs no)
 - [ ] S3 upload/download live test against the staging bucket
-- [ ] Full suite against the staging ALB (needs staging RDS)
+- [ ] Full test suite against the staging ALB (needs staging DATABASE_URL secret)
 - [ ] RDS backup/restore drill
-- [ ] prod path built but not applied (stage 6 gate)
+- [x] prod path built but not applied (stage 6 gate)
 
 ## Running cost
 
