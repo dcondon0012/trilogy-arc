@@ -31,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       tasks:
-        description: 'Comma-separated: logs, sns, s3, suite, rds-drill (or all)'
+        description: 'Comma-separated: logs, sns, s3, suite, rds-drill, sweep (or all)'
         required: false
         default: 'logs,sns,s3,suite'
 
@@ -71,7 +71,7 @@ jobs:
             T=$(python3 -c "import json;print(json.load(open('.github/ops-request.json')).get('tasks',''))")
           fi
           if [ -z "$T" ]; then T="logs,sns,s3,suite"; fi
-          if [ "$T" = "all" ]; then T="logs,sns,s3,suite,rds-drill"; fi
+          if [ "$T" = "all" ]; then T="logs,sns,s3,suite,rds-drill,sweep"; fi
           echo "list=$T" >> "$GITHUB_OUTPUT"
           echo "Running: $T"
 
@@ -573,6 +573,55 @@ jobs:
             fi
           fi
           echo >> .ops/report.md
+
+      # ── Leftovers ─────────────────────────────────────────────────────────
+      # `delete-db-instance` returns as soon as the request is accepted, so a
+      # drill that reported a clean teardown can still leave an instance behind
+      # if the delete failed afterwards. A forgotten t4g.micro is ~$13/mo that
+      # nobody notices, so this sweep names anything left and fails if it finds
+      # something. Cheap enough to run on its own: tasks = "sweep".
+      - name: Sweep — no drill leftovers
+        if: always() && contains(steps.tasks.outputs.list, 'sweep')
+        run: |
+          set -u
+          FAIL=0
+          {
+            echo "## Leftover sweep"
+            echo
+          } >> .ops/report.md
+          INST=$(aws rds describe-db-instances \
+                   --query "DBInstances[?contains(DBInstanceIdentifier,'drill')].[DBInstanceIdentifier,DBInstanceStatus]" \
+                   --output text 2>/dev/null || true)
+          SNAPS=$(aws rds describe-db-snapshots --snapshot-type manual \
+                   --query "DBSnapshots[?contains(DBSnapshotIdentifier,'arc-staging-snap-')].[DBSnapshotIdentifier,Status]" \
+                   --output text 2>/dev/null || true)
+          if [ -n "$INST" ]; then
+            {
+              echo "- **FAIL** drill instances still present (deleting is fine, existing is not):"
+              echo '```'
+              echo "$INST"
+              echo '```'
+            } >> .ops/report.md
+            FAIL=1
+          else
+            echo "- no drill database instances remain" >> .ops/report.md
+          fi
+          if [ -n "$SNAPS" ]; then
+            {
+              echo "- **FAIL** drill snapshots still present:"
+              echo '```'
+              echo "$SNAPS"
+              echo '```'
+            } >> .ops/report.md
+            FAIL=1
+          else
+            echo "- no drill snapshots remain" >> .ops/report.md
+          fi
+          PROBE=$(aws s3api list-objects-v2 --bucket "${{ steps.tf.outputs.uploads_bucket }}" \
+                    --prefix "ops-probe/" --query 'KeyCount' --output text 2>/dev/null || echo 0)
+          echo "- objects left under \`ops-probe/\`: \`$PROBE\` (want \`0\` or \`None\`)" >> .ops/report.md
+          echo >> .ops/report.md
+          exit "$FAIL"
 
       # ── Return the findings over git, the one channel a sandbox can read ──
       # Cloned to a temp dir so the working checkout is never mutated.

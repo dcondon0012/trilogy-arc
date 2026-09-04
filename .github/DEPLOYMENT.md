@@ -146,10 +146,68 @@ change is invisible to Terraform and gets overwritten by the next apply.
 Multi-AZ in prod only. `DATABASE_URL` lives in Secrets Manager and is injected
 into the task; it is never in the image or in a workflow file.
 
+### Verifying a deployed environment
+
+`staging-ops.yml` runs the checks that need AWS itself: CloudWatch (group,
+streams, recent events, and a credential scan of the real logs), S3 (public
+access block, KMS default encryption, versioning, and a put/get round trip),
+the alarm path (subscription confirmed, alarms wired, then one alarm pushed
+into ALARM for real so the topic publishes), and an RDS snapshot/restore
+drill that tears its own restore back down.
+
+Run it from Actions → Staging ops once the file reaches `main` at stage 6.
+Before then, `workflow_dispatch` is invisible, so a session triggers it by
+writing `.github/ops-request.json` and pushing to the `ops-run` branch:
+
+```json
+{ "tasks": "logs,sns,s3,rds-drill" }
+```
+
+Findings come back two ways, because a sandboxed session cannot read Actions
+logs or artifacts (`results-receiver.actions.githubusercontent.com` and
+`*.blob.core.windows.net` are both off the egress allowlist): each check is
+its own step that exits on its own verdict, and the detail is pushed as
+markdown to the `ops-results` branch (`results/latest.md`).
+
+### Secure cookies need TLS, and fail silently without it
+
+`SECURE_COOKIES` is set from `certificate_arn` — `"1"` when a certificate is
+configured, `"0"` when there is none. That is not a preference. `cookie-session`
+will not emit a `secure` cookie on a request it considers plaintext, and with
+`trust proxy` on it believes `X-Forwarded-Proto`, which a cert-less listener
+sets to `http`. It does not raise: `POST /api/auth/login` answers **200 with a
+valid body and no `Set-Cookie` header**, so every following request is a 401 and
+nothing appears in the logs. Staging ran that way from its first deploy —
+`/api/health` needs no session, so the pipeline's hash check stayed green over
+the top of an app nobody could log into.
+
+If you put a certificate on staging, this flips to `"1"` on the next apply and
+needs no code change.
+
+### Running the api suite against a deployed environment
+
+`scripts/api-test.ts` is pure HTTP — it takes `BASE` and imports no database —
+so pointing it at an ALB needs no secret and no database reachability. It still
+cannot serve as a gate on a deployed environment, for two independent reasons:
+
+- **Production mode flags the demo passwords.** With `NODE_ENV=production`,
+  `flagSeedPasswords()` sets `mustChangePw` on any seed account still on its
+  default, and `requireAuth` then 403s every path outside `/api/auth/*`. The
+  suite authenticates as exactly such an account, so it gets through login and
+  MFA and then fails on the first real endpoint.
+- **Its opening assertions encode a virgin database.** "First login → MFA
+  enrollment" holds once per database; the secret persists by design, so a
+  second run against the same environment cannot pass it.
+
+The suite is therefore a pre-deploy gate — CI runs it against a fresh Postgres
+on every push, which is the right place for it. Verifying the deployed stack is
+`staging-ops.yml`'s job.
+
 ### Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| Login 200s but every later call is 401, nothing logged | `SECURE_COOKIES=1` with no TLS at the ALB — no `Set-Cookie` is sent | see the secure-cookie note above; the env var tracks `certificate_arn` |
 | Build fails on "no active S3 backend" | step 3 not done | uncomment the backend block in `main.tf` |
 | `terraform init` fails on the bucket | setup workflow not run, or wrong region | re-run setup, check `AWS_REGION` matches |
 | Suite fails only in CI | Postgres service container not ready | check the uploaded `server-log` artifact |
