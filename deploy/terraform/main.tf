@@ -17,23 +17,18 @@ terraform {
     aws    = { source = "hashicorp/aws", version = "~> 5.0" }
     random = { source = "hashicorp/random", version = "~> 3.6" }
   }
-  # Remote state. Uncomment this AFTER .github/workflows/setup-infrastructure.yml
-  # has run once — it creates the bucket and lock table and prints these exact
-  # values. Fill in <account-id> from its summary.
-  #
-  # Until it is uncommented, .github/workflows/deploy.yml refuses to run: with
-  # local state every CI run starts blank, so Terraform cannot see what it already
-  # built and would happily create a second VPC, RDS instance and ALB while losing
-  # track of the first set. Workspaces keep staging and prod state separate under
-  # the same key.
-  #
-  # backend "s3" {
-  #   bucket         = "trilogy-arc-tfstate-<account-id>"
-  #   key            = "arc/terraform.tfstate"
-  #   region         = "us-west-2"
-  #   dynamodb_table = "trilogy-arc-tflock"
-  #   encrypt        = true
-  # }
+  # Remote state — bucket and lock table created by setup-infrastructure.yml
+  # (run 09/04/2026, account 306077570168). Workspaces keep staging and prod
+  # state separate under the same key. deploy.yml refuses to run if this block
+  # is ever commented out again: with local state every CI run starts blank and
+  # Terraform would rebuild everything as duplicates it can't track.
+  backend "s3" {
+    bucket         = "trilogy-arc-tfstate-306077570168"
+    key            = "arc/terraform.tfstate"
+    region         = "us-west-2"
+    dynamodb_table = "trilogy-arc-tflock"
+    encrypt        = true
+  }
 }
 
 provider "aws" {
