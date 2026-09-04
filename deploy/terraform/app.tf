@@ -100,7 +100,18 @@ resource "aws_ecs_task_definition" "app" {
     environment = [
       { name = "NODE_ENV", value = "production" },
       { name = "PORT", value = "4000" },
-      { name = "SECURE_COOKIES", value = "1" },
+      # Secure cookies exactly when TLS actually terminates at the ALB.
+      # cookie-session refuses to emit a `secure` cookie on a request it sees as
+      # plaintext, and with `trust proxy` on it believes X-Forwarded-Proto — which
+      # a cert-less listener sets to "http". It does not error: the login route
+      # still answers 200 with a valid body and simply sends NO Set-Cookie, so
+      # every following request is a 401 and nothing is logged. Staging ran that
+      # way from the first deploy — /api/health needs no session, so deploys
+      # verified green while the app was unusable (found 09/04, reproduced in a
+      # sandbox by forwarding each proto in turn). Prod gets a cert at stage 6
+      # and evaluates to "1"; flip a cert onto staging and it does too.
+      { name = "SECURE_COOKIES", value = var.certificate_arn == "" ? "0" : "1" },
+      # Independent of the above: keeps req.ip the real client for rate limiting.
       { name = "TRUST_PROXY", value = "1" },
       { name = "S3_UPLOADS_BUCKET", value = aws_s3_bucket.uploads.bucket },
       { name = "AWS_REGION", value = var.region },
