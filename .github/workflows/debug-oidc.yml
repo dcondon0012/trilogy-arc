@@ -89,6 +89,37 @@ jobs:
     needs: repair
     runs-on: ubuntu-latest
     steps:
+      # The config in AWS looks textbook-correct, yet STS says no. So look at
+      # what GitHub ACTUALLY sends: fetch the OIDC token and print its claims
+      # (iss/aud/sub — public metadata, not a secret; the token itself is
+      # never printed). If sub or iss differs from what the trust policy
+      # expects, that's the answer.
+      - name: Show the token's actual claims
+        run: |
+          RESP=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
+          TOK=$(echo "$RESP" | jq -r .value)
+          PAYLOAD=$(echo "$TOK" | cut -d. -f2)
+          python3 -c "
+          import base64, json, sys
+          p = sys.argv[1]; p += '=' * (-len(p) % 4)
+          c = json.loads(base64.urlsafe_b64decode(p))
+          keep = ('iss','aud','sub','repository','repository_owner','ref','event_name')
+          print(json.dumps({k: c[k] for k in keep if k in c}, indent=2))" "$PAYLOAD"
+
+      - name: Raw STS call (full error text, if it fails)
+        run: |
+          RESP=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
+          TOK=$(echo "$RESP" | jq -r .value)
+          aws sts assume-role-with-web-identity \
+            --role-arn arn:aws:iam::306077570168:role/github-actions-arc \
+            --role-session-name debug-oidc \
+            --web-identity-token "$TOK" \
+            --query 'AssumedRoleUser.Arn' --output text || echo "(raw call failed — error above)"
+        env:
+          AWS_DEFAULT_REGION: us-west-2
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::306077570168:role/github-actions-arc
@@ -97,4 +128,4 @@ jobs:
       - name: Who am I?
         run: |
           aws sts get-caller-identity --output json
-          echo "OIDC works. Re-run deploy run #7's failed jobs, then delete this workflow."
+          echo "OIDC works. Re-run the latest Deploy Arc run's failed jobs, then delete this workflow."
