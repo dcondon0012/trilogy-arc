@@ -14,7 +14,7 @@
 #   only appears once the file is on the default branch, which happens at stage
 #   6; until then use the branch route below.)
 #   A worker session: write .github/ops-request.json and push to `ops-run`:
-#     {"tasks": "logs,s3,suite"}
+#     {"tasks": "logs,sns,s3,suite"}
 #   `ops-run` is not a deploy trigger, so running ops never redeploys anything.
 #
 # Nothing here applies Terraform and nothing here touches prod.
@@ -31,9 +31,9 @@ on:
   workflow_dispatch:
     inputs:
       tasks:
-        description: 'Comma-separated: logs, s3, suite, rds-drill (or all)'
+        description: 'Comma-separated: logs, sns, s3, suite, rds-drill (or all)'
         required: false
-        default: 'logs,s3,suite'
+        default: 'logs,sns,s3,suite'
 
 permissions:
   contents: write   # pushes the report to the ops-results branch
@@ -70,8 +70,8 @@ jobs:
           if [ -z "$T" ] && [ -f .github/ops-request.json ]; then
             T=$(python3 -c "import json;print(json.load(open('.github/ops-request.json')).get('tasks',''))")
           fi
-          if [ -z "$T" ]; then T="logs,s3,suite"; fi
-          if [ "$T" = "all" ]; then T="logs,s3,suite,rds-drill"; fi
+          if [ -z "$T" ]; then T="logs,sns,s3,suite"; fi
+          if [ "$T" = "all" ]; then T="logs,sns,s3,suite,rds-drill"; fi
           echo "list=$T" >> "$GITHUB_OUTPUT"
           echo "Running: $T"
 
@@ -387,6 +387,76 @@ jobs:
           fi
           echo "- the suite's uploads reached S3 through the app's storage layer" >> .ops/report.md
           exit 0
+
+      # ── Alarms and their delivery path ────────────────────────────────────
+      # "Confirm the SNS subscription" really means "prove an alarm reaches a
+      # human". So: check the subscription is confirmed, check each alarm is
+      # wired to the topic, then push one alarm into ALARM for real and let it
+      # publish. arc-staging-5xx-spike is the one used deliberately — it has
+      # alarm_actions and no ok_actions, so the test sends exactly one email.
+      # set-alarm-state is temporary; the next metric evaluation resets it, and
+      # treat_missing_data=notBreaching means that lands back on OK by itself.
+      - name: Alarms — subscription confirmed, wiring, live delivery test
+        if: contains(steps.tasks.outputs.list, 'sns')
+        run: |
+          set -u
+          TOPIC="arn:aws:sns:us-west-2:306077570168:arc-staging-alerts"
+          FAIL=0
+          {
+            echo "## Alarms and delivery"
+            echo
+          } >> .ops/report.md
+
+          SUBS=$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC" \
+                   --query 'Subscriptions[].[Protocol,Endpoint,SubscriptionArn]' --output text)
+          if [ -z "$SUBS" ]; then
+            echo "- **FAIL** the topic has no subscriptions at all" >> .ops/report.md
+            FAIL=1
+          fi
+          PENDING=0
+          echo "$SUBS" | while IFS= read -r L; do
+            if [ -n "$L" ]; then echo "- subscription: \`$L\`" >> .ops/report.md; fi
+          done
+          if echo "$SUBS" | grep -q "PendingConfirmation"; then
+            PENDING=1
+            {
+              echo "- **FAIL** the email subscription is still \`PendingConfirmation\` — alarms are silent."
+              echo "  Donny has to open the \"AWS Notification - Subscription Confirmation\" mail"
+              echo "  (sent 16:55Z on 09/04, valid 3 days) and click Confirm subscription."
+            } >> .ops/report.md
+            FAIL=1
+          else
+            echo "- email subscription is confirmed" >> .ops/report.md
+          fi
+
+          for A in arc-staging-no-healthy-tasks arc-staging-5xx-spike arc-staging-db-cpu; do
+            INFO=$(aws cloudwatch describe-alarms --alarm-names "$A" \
+                     --query 'MetricAlarms[0].[StateValue,ActionsEnabled]' --output text 2>/dev/null || true)
+            HAS=$(aws cloudwatch describe-alarms --alarm-names "$A" \
+                    --query "MetricAlarms[0].AlarmActions[?@=='$TOPIC'] | length(@)" --output text 2>/dev/null || echo 0)
+            echo "- \`$A\`: state/actions \`$INFO\`, wired to topic: \`$HAS\`" >> .ops/report.md
+            if [ "${HAS:-0}" -lt 1 ]; then
+              echo "  - **FAIL** not wired to the alerts topic" >> .ops/report.md
+              FAIL=1
+            fi
+          done
+
+          if [ "$PENDING" -eq 0 ]; then
+            MARK="staging-ops delivery test run ${{ github.run_number }}"
+            aws cloudwatch set-alarm-state --alarm-name arc-staging-5xx-spike \
+              --state-value ALARM --state-reason "$MARK" >/dev/null
+            sleep 20
+            aws cloudwatch set-alarm-state --alarm-name arc-staging-5xx-spike \
+              --state-value OK --state-reason "staging-ops test complete" >/dev/null
+            {
+              echo "- fired \`arc-staging-5xx-spike\` into ALARM with reason \"$MARK\", then reset it to OK"
+              echo "- one alarm email should now be in the alert inbox — the session checks for it"
+            } >> .ops/report.md
+          else
+            echo "- delivery test skipped: nothing would arrive while the subscription is pending" >> .ops/report.md
+          fi
+          echo >> .ops/report.md
+          exit "$FAIL"
 
       # ── RDS backup/restore drill ──────────────────────────────────────────
       # Snapshot staging, restore it beside itself, confirm the restore comes
