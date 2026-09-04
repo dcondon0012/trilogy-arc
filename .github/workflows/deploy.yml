@@ -14,6 +14,9 @@ name: Deploy Arc
 on:
   push:
     branches: [dev]
+    # The temporary OIDC-repair workflow triggers itself; a deploy alongside
+    # it would race the repair and fail confusingly. Remove with the file.
+    paths-ignore: ['.github/workflows/debug-oidc.yml']
   workflow_dispatch:
     inputs:
       environment:
