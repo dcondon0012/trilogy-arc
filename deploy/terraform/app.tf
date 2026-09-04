@@ -104,6 +104,10 @@ resource "aws_ecs_task_definition" "app" {
       { name = "TRUST_PROXY", value = "1" },
       { name = "S3_UPLOADS_BUCKET", value = aws_s3_bucket.uploads.bucket },
       { name = "AWS_REGION", value = var.region },
+      # RDS forces SSL; see the db_url secret in database.tf for why the URL
+      # itself must NOT carry sslmode. The bundle ships in the image.
+      { name = "PGSSL", value = "1" },
+      { name = "PGSSLROOTCERT", value = "/app/rds-global-bundle.pem" },
     ]
     secrets = [
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.db_url.arn },

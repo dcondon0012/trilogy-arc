@@ -49,11 +49,19 @@ function sslConfig(): pg.PoolConfig['ssl'] {
   const url = process.env.DATABASE_URL || '';
   const wants = /[?&]sslmode=(require|verify-ca|verify-full)/.test(url) || process.env.PGSSL === '1';
   if (!wants) return undefined;
-  // RDS: point PGSSLROOTCERT at the AWS bundle for real verification. Without
-  // it we still encrypt, but can't verify the peer — fine inside the VPC,
-  // and stage 5 sets the cert path in the task definition.
+  // RDS: point PGSSLROOTCERT at the AWS bundle for real verification (the ECS
+  // task definition sets it; the bundle is baked into the image). Without it —
+  // or if the file can't be read — we still encrypt but can't verify the peer:
+  // acceptable inside the VPC, and strictly better than crash-looping the
+  // service over a missing file.
   const ca = process.env.PGSSLROOTCERT;
-  if (ca) return { ca: fs.readFileSync(ca, 'utf8'), rejectUnauthorized: true };
+  if (ca) {
+    try {
+      return { ca: fs.readFileSync(ca, 'utf8'), rejectUnauthorized: true };
+    } catch (e: any) {
+      console.error(`[pgdb] PGSSLROOTCERT unreadable (${ca}): ${e?.message} — TLS stays on WITHOUT peer verification.`);
+    }
+  }
   return { rejectUnauthorized: false };
 }
 

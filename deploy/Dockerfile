@@ -9,13 +9,23 @@ FROM public.ecr.aws/docker/library/node:22-slim
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-ENV NODE_ENV=production
+
+# Amazon's RDS certificate bundle, so the app can VERIFY the database's TLS
+# cert (PGSSLROOTCERT points here in the task definition). Baked in at build:
+# a runtime download would put the registry/CDN on the boot path.
+ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /app/rds-global-bundle.pem
+RUN chmod 0444 /app/rds-global-bundle.pem
 
 # Install deps first so code changes don't bust the npm layer.
 # postinstall runs `npm --prefix client install`, so client/package*.json must be present.
+# NODE_ENV=production is set AFTER npm ci, deliberately: the app runs through
+# tsx, which is a devDependency — with production set first, npm ci omitted it
+# and every container boot re-downloaded tsx from the npm registry (seen live
+# on deploy #5's logs). Runtime still gets NODE_ENV=production via ENV below.
 COPY package.json package-lock.json ./
 COPY client/package.json client/package-lock.json ./client/
 RUN npm ci
+ENV NODE_ENV=production
 
 COPY . .
 

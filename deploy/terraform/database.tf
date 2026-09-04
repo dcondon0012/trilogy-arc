@@ -36,10 +36,13 @@ resource "aws_secretsmanager_secret" "db_url" {
 }
 resource "aws_secretsmanager_secret_version" "db_url" {
   secret_id = aws_secretsmanager_secret.db_url.id
-  # sslmode=require is NOT optional: RDS Postgres 16 defaults rds.force_ssl=1
-  # and rejects plaintext connections, so without it the app crash-loops at
-  # boot and the ALB never has a healthy target (found on the first staging
-  # deploy, 09/04). pgdb.ts reads sslmode from the URL; encrypted without CA
-  # verification until PGSSLROOTCERT ships in the task definition.
-  secret_string = "postgres://trilogy:${random_password.db.result}@${aws_db_instance.pg.endpoint}/trilogy?sslmode=require"
+  # Deliberately NO sslmode in this URL. TLS is driven by the PGSSL /
+  # PGSSLROOTCERT env vars in the task definition instead, because pg >= 8.23
+  # re-parses a URL sslmode and treats "require" as verify-full against Node's
+  # default CAs — which rejects RDS's Amazon-signed cert (SELF_SIGNED_CERT_IN
+  # _CHAIN, deploy #5) and overrides pgdb.ts's explicit ssl config. RDS 16
+  # still forces SSL (rds.force_ssl=1 — plaintext fails, deploy #3), so the
+  # env vars are load-bearing: PGSSL=1 turns TLS on, PGSSLROOTCERT verifies
+  # against the RDS bundle baked into the image.
+  secret_string = "postgres://trilogy:${random_password.db.result}@${aws_db_instance.pg.endpoint}/trilogy"
 }
