@@ -34,9 +34,18 @@ await ensureReferenceData();
 if (process.env.NODE_ENV === 'production') await flagSeedPasswords();  // gate retired → no default passwords in production
 await seedFeeCodes();
 
-// Deploy verification stamp: the current git commit, readable pre-gate at /api/health.
-let BUILD = 'unknown';
-try { BUILD = execSync('git rev-parse --short HEAD', { cwd: path.join(__dirname, '..') }).toString().trim(); } catch { /* not a git checkout */ }
+/* Deploy verification stamp: the commit this process is running, readable pre-gate
+   at /api/health. Two deploy shapes, two sources:
+   - Lightsail (today): the deploy IS a git checkout, so git answers.
+   - ECS (stage 5+): .dockerignore excludes .git, so git inside the image returns
+     nothing and this would read 'unknown' forever — which would silently break the
+     pipeline's post-deploy hash check and rule 8's cutover proof. The Actions build
+     bakes the SHA in as GIT_COMMIT (Dockerfile ARG), and that wins when present.
+   Normalized to 7 chars so both paths print the same short form. */
+let BUILD = (process.env.GIT_COMMIT || '').trim().slice(0, 7) || 'unknown';
+if (BUILD === 'unknown') {
+  try { BUILD = execSync('git rev-parse --short HEAD', { cwd: path.join(__dirname, '..') }).toString().trim(); } catch { /* not a git checkout */ }
+}
 
 const app = express();
 // Behind a TLS-terminating reverse proxy (Caddy/ALB): trust X-Forwarded-* so that

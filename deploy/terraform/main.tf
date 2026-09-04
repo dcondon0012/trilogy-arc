@@ -17,8 +17,23 @@ terraform {
     aws    = { source = "hashicorp/aws", version = "~> 5.0" }
     random = { source = "hashicorp/random", version = "~> 3.6" }
   }
-  # Remote state (S3 + lock table) is configured at `terraform init` time once the
-  # account's state bucket exists — see stage 5 in the migration state doc.
+  # Remote state. Uncomment this AFTER .github/workflows/setup-infrastructure.yml
+  # has run once — it creates the bucket and lock table and prints these exact
+  # values. Fill in <account-id> from its summary.
+  #
+  # Until it is uncommented, .github/workflows/deploy.yml refuses to run: with
+  # local state every CI run starts blank, so Terraform cannot see what it already
+  # built and would happily create a second VPC, RDS instance and ALB while losing
+  # track of the first set. Workspaces keep staging and prod state separate under
+  # the same key.
+  #
+  # backend "s3" {
+  #   bucket         = "trilogy-arc-tfstate-<account-id>"
+  #   key            = "arc/terraform.tfstate"
+  #   region         = "us-west-2"
+  #   dynamodb_table = "trilogy-arc-tflock"
+  #   encrypt        = true
+  # }
 }
 
 provider "aws" {

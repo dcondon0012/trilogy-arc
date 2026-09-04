@@ -20,6 +20,12 @@ COPY . .
 ENV TRILOGY_DATA_DIR=/data
 VOLUME /data
 
+# Which commit this image contains. .dockerignore excludes .git, so the server
+# cannot ask git once it is in here — the build passes the SHA in instead and
+# /api/health reports it back. Declared after COPY so it never busts the npm layer.
+ARG GIT_COMMIT=""
+ENV GIT_COMMIT=$GIT_COMMIT
+
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -fsS http://localhost:4000/api/health || exit 1
 
