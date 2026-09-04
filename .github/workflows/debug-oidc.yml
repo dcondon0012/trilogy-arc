@@ -2,6 +2,13 @@
 # ("Not authorized to perform sts:AssumeRoleWithWebIdentity"). Uses the
 # still-present AWS key secrets to inspect and fix, then proves OIDC works
 # in a second job. Delete this file once deploy.yml goes green on OIDC.
+#
+# ROOT CAUSE (found by the claims printout): GitHub's OIDC sub claim now
+# embeds immutable numeric IDs — this repo presents
+#   repo:dcondon0012@321908854/trilogy-arc@1348898879:ref:refs/heads/dev
+# so the plain "repo:owner/repo:*" pattern never matches. The trust policy
+# below accepts both forms; the ID-pinned one is the stronger condition
+# (numeric IDs survive renames and can't be re-registered by squatters).
 name: Debug OIDC (temporary)
 
 on:
@@ -73,7 +80,10 @@ jobs:
                   "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
                 },
                 "StringLike": {
-                  "token.actions.githubusercontent.com:sub": "repo:$GH_REPO:*"
+                  "token.actions.githubusercontent.com:sub": [
+                    "repo:$GH_REPO:*",
+                    "repo:dcondon0012@321908854/trilogy-arc@1348898879:*"
+                  ]
                 }
               }
             }]
