@@ -302,6 +302,33 @@ jobs:
         env:
           ENV: ${{ needs.verify.outputs.target }}
 
+      # When the deploy or its verification fails, put the WHY in the run log:
+      # service events, why tasks stopped, target health, and the app's own logs.
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          SERVICE="arc-$ENV"
+          echo "=== ECS service events (latest 10) ==="
+          aws ecs describe-services --cluster "$SERVICE" --services "$SERVICE" \
+            --query 'services[0].events[:10].[createdAt,message]' --output table || true
+          echo "=== Stopped tasks — why they died (latest 3) ==="
+          TASKS=$(aws ecs list-tasks --cluster "$SERVICE" --desired-status STOPPED \
+            --query 'taskArns[:3]' --output text)
+          if [ -n "$TASKS" ] && [ "$TASKS" != "None" ]; then
+            aws ecs describe-tasks --cluster "$SERVICE" --tasks $TASKS \
+              --query 'tasks[].[stoppedAt,stoppedReason,containers[0].reason]' --output table || true
+          fi
+          echo "=== Target health ==="
+          TG=$(aws elbv2 describe-target-groups --names "$SERVICE" \
+            --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null) \
+            && aws elbv2 describe-target-health --target-group-arn "$TG" \
+                 --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State,TargetHealth.Reason,TargetHealth.Description]' \
+                 --output table || true
+          echo "=== App log tail (last 15 min) ==="
+          aws logs tail "/ecs/$SERVICE" --since 15m --format short 2>/dev/null | tail -120 || echo "(no log events)"
+        env:
+          ENV: ${{ needs.verify.outputs.target }}
+
       - name: Summary
         run: |
           {
